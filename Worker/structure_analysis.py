@@ -2,7 +2,7 @@
 Structure Analysis
 ==================
 Converts raw OCR TextBlocks + LayoutBlocks into a structured document model
-ready for EPUB assembly.
+ready for EPUB / PDF assembly.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ocr_engine import TextBlock, LayoutBlock, TextDirection, LayoutType
+from ocr_engine import TextBlock, LayoutBlock, BBox, TextDirection, LayoutType
 from pdf_ingestion import PageInfo
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,10 @@ class StructuredElement:
     level: int = 1             # heading level (1–3), ignored for non-headings
     direction: TextDirection = "horizontal"
     href: Optional[str] = None # if this element is a hyperlink
+    # Pixel-space bounding box (same coord system as TextBlock.bbox) if known.
+    # The text-layer PDF assembler uses this to align the invisible OCR
+    # overlay with the visible scanned text underneath. None on fallback paths.
+    bbox: Optional[BBox] = None
 
 
 @dataclass
@@ -42,6 +46,9 @@ class StructuredPage:
     elements: List[StructuredElement] = field(default_factory=list)
     images: List[StructuredImage]     = field(default_factory=list)
     is_image_only: bool = False
+    # Pixel-space dimensions of the rasterised page used for OCR.
+    width_px: float = 0.0
+    height_px: float = 0.0
 
 
 @dataclass
@@ -65,7 +72,20 @@ def analyse_page(
     Combine OCR text blocks, layout classifications, and page metadata
     into a StructuredPage.
     """
-    page = StructuredPage(page_number=page_number, direction=direction)
+    # Scale page dimensions from PDF points to pixel space so that
+    # bbox coordinates (in pixels from OCR at `dpi`) can be compared
+    # against page dimensions in the same coordinate system.
+    # PDF default is 72 DPI; page_info.width/height are in PDF points.
+    dpi_scale       = dpi / 72.0
+    page_width_px   = page_info.width  * dpi_scale
+    page_height_px  = page_info.height * dpi_scale
+
+    page = StructuredPage(
+        page_number=page_number,
+        direction=direction,
+        width_px=page_width_px,
+        height_px=page_height_px,
+    )
 
     # ── Image-only page detection ────────────────────────────────────────────
     if not text_blocks and page_info.images:
@@ -84,6 +104,8 @@ def analyse_page(
     median_size = sorted(sizes)[len(sizes) // 2] if sizes else 12.0
 
     # ── Match layout blocks to text blocks ───────────────────────────────────
+    # Both layout_blocks and text_blocks come from the OCR engine, so their
+    # bboxes share the same pixel coordinate system.
     layout_map: dict[int, LayoutType] = {}   # index into text_blocks → type
     for lb in layout_blocks:
         for i, tb in enumerate(text_blocks):
@@ -91,18 +113,21 @@ def analyse_page(
                 layout_map[i] = lb.block_type
 
     # ── Match hyperlinks to text blocks ──────────────────────────────────────
+    # FIX: hyperlink bboxes come from PyMuPDF in PDF point space, but text-
+    # block bboxes are in pixel space. Convert the link bbox to pixel space
+    # so the overlap test is meaningful (previously it never matched at
+    # 400 DPI because the link rect was ~5.5× smaller than the text rect).
     link_map: dict[int, str] = {}
     for link in page_info.links:
+        link_bbox_px = BBox(
+            link.bbox.x0 * dpi_scale,
+            link.bbox.y0 * dpi_scale,
+            link.bbox.x1 * dpi_scale,
+            link.bbox.y1 * dpi_scale,
+        )
         for i, tb in enumerate(text_blocks):
-            if link.bbox.overlaps(tb.bbox, threshold=0.2):
+            if link_bbox_px.overlaps(tb.bbox, threshold=0.2):
                 link_map[i] = link.url
-
-    # FIX: Scale page dimensions from PDF points to pixel space so that
-    # bbox coordinates (in pixels from OCR at `dpi`) can be compared
-    # against page height in the same coordinate system.
-    # PDF default is 72 DPI; page_info.height is in points (1 pt = 1/72 inch).
-    dpi_scale = dpi / 72.0
-    page_height_px = page_info.height * dpi_scale
 
     # ── Build elements ───────────────────────────────────────────────────────
     for i, tb in enumerate(text_blocks):
@@ -122,6 +147,7 @@ def analyse_page(
             level=level if block_type == "heading" else 1,
             direction=tb.direction,
             href=href,
+            bbox=tb.bbox,
         ))
 
     # ── Embed images that appear on this page ────────────────────────────────
@@ -149,9 +175,7 @@ def _infer_type(
     text = tb.text.strip()
     if re.fullmatch(r"\d{1,4}", text):
         y_center = (tb.bbox.y0 + tb.bbox.y1) / 2
-        # FIX: Compare against page_height_px (pixel space) instead of
-        # page_info.height (PDF points). Both y_center and page_height_px
-        # are now in the same coordinate system.
+        # Both y_center and page_height_px are in pixel space.
         if y_center < page_height_px * 0.1 or y_center > page_height_px * 0.9:
             return "page-number"
 
