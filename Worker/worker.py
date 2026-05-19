@@ -196,8 +196,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                     _save_ocr_page(r, job_id, page_num, page_result)
 
             page_info = ingested.pages[page_num]
-            # FIX: Pass dpi so analyse_page can scale page dimensions
-            # from PDF points to pixel coordinates for correct heuristics.
+            # Pass dpi so analyse_page can scale page dimensions from PDF
+            # points to pixel coordinates for correct heuristics, and so
+            # each StructuredElement retains the OCR pixel bbox.
             sp = analyse_page(page_number=page_num, text_blocks=text_blocks,
                               layout_blocks=layout_blocks, page_info=page_info,
                               direction=direction, image_id_counter=image_id_counter,
@@ -236,7 +237,11 @@ def run_pipeline(r, job: dict, engine) -> None:
             update_job(r, job_id, message="Building searchable PDF…", progress=87 + int(i/n*10))
             try:
                 p = OUTPUT_DIR / f"{job_id}_searchable.pdf"
-                assemble_textlayer_pdf(structure, pdf_path, p)
+                # Pass the same DPI used during rasterisation so each
+                # element's pixel-space bbox can be converted back to PDF
+                # point space — this is what lets text selection in the
+                # resulting PDF pick up the correct text region.
+                assemble_textlayer_pdf(structure, pdf_path, p, dpi=DPI)
                 output_paths["textlayer_path"] = str(p)
             except Exception as e:
                 logger.error(f"Text-layer PDF assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
