@@ -32,9 +32,26 @@ def assemble_textlayer_pdf(
     structure: DocumentStructure,
     original_pdf_path: Path,
     output_path: Path,
+    dpi: int = 400,
 ) -> None:
-    """Overlay invisible OCR text on each page of the original PDF."""
+    """
+    Overlay invisible OCR text on each page of the original PDF.
+
+    Each element's OCR pixel-space bounding box is converted back to PDF
+    point space using the same `dpi` the worker rasterised at, so the
+    invisible text aligns with the visible scanned text underneath.
+    This means a user selecting a region of the PDF in any reader gets
+    the actual text from that visual region — copy/paste and full-text
+    search both work correctly.
+
+    For elements without a bbox (rare fallback path), the previous
+    index-based vertical distribution is used so we still emit something
+    searchable rather than dropping the text.
+    """
     logger.info(f"Assembling text-layer PDF: {output_path}")
+
+    # Pixel → point scale (must match the DPI used during rasterisation).
+    px_to_pt = 72.0 / float(dpi)
 
     doc = fitz.open(str(original_pdf_path))
 
@@ -46,43 +63,110 @@ def assemble_textlayer_pdf(
             continue
 
         page_rect = page.rect
-        total = len(struct_page.elements)
 
-        for idx, el in enumerate(struct_page.elements):
+        # Split elements: bbox-anchored placement first, then fallback for any
+        # without bbox info.
+        bbox_els    = [el for el in struct_page.elements if el.bbox is not None]
+        no_bbox_els = [el for el in struct_page.elements if el.bbox is None]
+
+        # ── Place bbox-anchored text overlays ─────────────────────────────
+        for el in bbox_els:
             text = el.text.strip()
             if not text:
                 continue
 
-            # Distribute text vertically across the page
-            y_ratio = (idx + 0.5) / max(total, 1)
-            y_pos = page_rect.y0 + y_ratio * page_rect.height
-            y_pos = max(page_rect.y0 + 10, min(y_pos, page_rect.y1 - 20))
+            b = el.bbox
+            # Convert pixel → point and clamp to the page rect.
+            x0 = max(page_rect.x0, min(page_rect.x1, b.x0 * px_to_pt))
+            y0 = max(page_rect.y0, min(page_rect.y1, b.y0 * px_to_pt))
+            x1 = max(page_rect.x0, min(page_rect.x1, b.x1 * px_to_pt))
+            y1 = max(page_rect.y0, min(page_rect.y1, b.y1 * px_to_pt))
+
+            box_w = max(1.0, x1 - x0)
+            box_h = max(1.0, y1 - y0)
+
+            # Initial font-size guess: roughly fill the bbox height. For
+            # vertical text, the column height divided by character count
+            # gives a per-char height; for horizontal text, use the line
+            # height directly.
+            if el.direction == "vertical" and len(text) > 0:
+                fontsize = max(4.0, min(36.0, box_h / max(len(text), 1)))
+            else:
+                fontsize = max(4.0, min(36.0, box_h * 0.85))
 
             try:
                 tw = fitz.TextWriter(page_rect)
                 font = fitz.Font("china-s")
-                fontsize = 8
-                max_width = page_rect.width - 40
 
-                lines = _wrap_text(text, font, fontsize, max_width)
-                y_cursor = y_pos
+                # Wrap to the bbox width; if the wrapped text would overflow
+                # vertically, shrink the font so all lines fit within the bbox.
+                lines  = _wrap_text(text, font, fontsize, box_w)
+                line_h = fontsize * 1.25
+                if lines and line_h * len(lines) > box_h:
+                    shrink   = box_h / (line_h * len(lines))
+                    fontsize = max(2.0, fontsize * shrink)
+                    line_h   = fontsize * 1.25
+                    lines    = _wrap_text(text, font, fontsize, box_w)
+
+                y_cursor = y0 + fontsize  # baseline of first line
                 for line in lines:
-                    if y_cursor > page_rect.y1 - 10:
+                    if y_cursor > y1 + line_h:
                         break
                     try:
-                        tw.append(pos=(page_rect.x0 + 20, y_cursor),
-                                  text=line, font=font, fontsize=fontsize)
+                        tw.append(
+                            pos=(x0, y_cursor),
+                            text=line, font=font, fontsize=fontsize,
+                        )
                     except Exception:
                         pass
-                    y_cursor += fontsize * 1.4
+                    y_cursor += line_h
+                # render_mode=3 → text is invisible but searchable/selectable.
                 tw.write_text(page, color=(1, 1, 1), render_mode=3)
             except Exception:
+                # Last-resort fallback: drop a tiny invisible string at the
+                # bbox origin so the text is at least findable, even if not
+                # perfectly positioned.
                 try:
                     page.insert_text(
-                        point=(page_rect.x0 + 20, y_pos),
-                        text=text[:200], fontsize=1, color=(1, 1, 1))
+                        point=(x0, max(y0 + 1, page_rect.y0 + 1)),
+                        text=text[:500], fontsize=1, color=(1, 1, 1))
                 except Exception:
                     pass
+
+        # ── Fallback distribution for elements without bbox info ──────────
+        if no_bbox_els:
+            total = len(no_bbox_els)
+            for idx, el in enumerate(no_bbox_els):
+                text = el.text.strip()
+                if not text:
+                    continue
+                y_ratio = (idx + 0.5) / max(total, 1)
+                y_pos = page_rect.y0 + y_ratio * page_rect.height
+                y_pos = max(page_rect.y0 + 10, min(y_pos, page_rect.y1 - 20))
+                try:
+                    tw = fitz.TextWriter(page_rect)
+                    font = fitz.Font("china-s")
+                    fontsize = 8
+                    max_width = page_rect.width - 40
+                    lines = _wrap_text(text, font, fontsize, max_width)
+                    y_cursor = y_pos
+                    for line in lines:
+                        if y_cursor > page_rect.y1 - 10:
+                            break
+                        try:
+                            tw.append(pos=(page_rect.x0 + 20, y_cursor),
+                                      text=line, font=font, fontsize=fontsize)
+                        except Exception:
+                            pass
+                        y_cursor += fontsize * 1.4
+                    tw.write_text(page, color=(1, 1, 1), render_mode=3)
+                except Exception:
+                    try:
+                        page.insert_text(
+                            point=(page_rect.x0 + 20, y_pos),
+                            text=text[:200], fontsize=1, color=(1, 1, 1))
+                    except Exception:
+                        pass
 
     doc.save(str(output_path), garbage=4, deflate=True)
     doc.close()
@@ -183,8 +267,6 @@ def _assemble_clean_pdf_reportlab(
     hs = {1: s_h1, 2: s_h2, 3: s_h3}
 
     # ── Collect ALL renderable paragraphs first, then build story ────────────
-    # This avoids the "Document is empty" error by ensuring we have real
-    # content before adding any PageBreaks.
     content_paragraphs: list = []   # list of flowable-lists, one per page
 
     for page in structure.pages:
@@ -240,23 +322,19 @@ def _assemble_clean_pdf_reportlab(
             story.append(Paragraph(_esc(structure.author), s_auth))
 
     if content_paragraphs:
-        # Add page break after title only if there's content following
         if story:
             story.append(PageBreak())
         for i, page_items in enumerate(content_paragraphs):
             story.extend(page_items)
-            # Page break between content pages, but NOT after the last one
             if i < len(content_paragraphs) - 1:
                 story.append(PageBreak())
     else:
-        # No content at all — add a placeholder
         if story:
             story.append(Spacer(1, 10 * mm))
         story.append(Paragraph(
             "[ No body text was extracted from this PDF ]", s_body
         ))
 
-    # ── Final safety: ensure story is never empty ────────────────────────────
     if not story:
         story.append(Paragraph(
             _esc(structure.title or "Untitled"), s_title
@@ -305,7 +383,6 @@ def _assemble_clean_pdf_pymupdf(
         if author:
             page.insert_text((72, 240), author[:100], fontsize=14)
 
-    # ── Content pages ─────────────────────────────────────────────────────────
     has_any_content = False
 
     for struct_page in structure.pages:
@@ -315,7 +392,7 @@ def _assemble_clean_pdf_pymupdf(
         page = doc.new_page(width=595, height=842)
         y_cursor = 60.0
         margin_left = 50.0
-        max_width = 495.0  # 595 - 2*50
+        max_width = 495.0
 
         for el in struct_page.elements:
             text = el.text.strip()
