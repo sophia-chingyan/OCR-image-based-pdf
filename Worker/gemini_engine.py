@@ -396,6 +396,8 @@ class GeminiOCREngine(OCREngine):
         attempt = 0
         last_exc: Exception = RuntimeError("no attempts made")
 
+        logger.info("OCR prompt:\n%s", OCR_PROMPT)
+
         while attempt < self.max_retries:
             attempt += 1
             self._rate_limiter.wait()
