@@ -1,5 +1,5 @@
 """
-Worker — supports three output formats: epub, textlayer, clean.
+Worker — supports one output format: clean PDF.
 
 Per-page OCR caching + Pause/Resume Support
 ============================================
@@ -38,7 +38,6 @@ for d in (UPLOAD_DIR, OUTPUT_DIR, TMPWORK_DIR):
 
 DPI          = CFG["ocr"]["dpi"]
 BATCH_SIZE   = CFG["pipeline"]["page_batch_size"]
-WRITING_MODE = CFG["epub"]["default_writing_mode"]
 CLEANUP      = CFG["pipeline"].get("tmp_cleanup_on_complete", True)
 
 
@@ -118,15 +117,14 @@ def run_pipeline(r, job: dict, engine) -> None:
     from structure_analysis import (
         analyse_page, build_toc, DocumentStructure, detect_dominant_language
     )
-    from epub_assembly import assemble_epub
-    from pdf_assembly import assemble_textlayer_pdf, assemble_clean_pdf
+    from pdf_assembly import assemble_clean_pdf
 
     job_id   = job["job_id"]
     pdf_path = Path(job["pdf_path"])
     tmp_dir  = TMPWORK_DIR / job_id
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    output_formats = job.get("output_formats", ["epub"]) or ["epub"]
+    output_formats = ["clean"]  # noqa: F841 – kept for job metadata consistency
 
     def check_stop_or_pause() -> str | None:
         """
@@ -225,71 +223,30 @@ def run_pipeline(r, job: dict, engine) -> None:
             pages=structured_pages, toc=toc,
             dominant_language=dominant_lang)
 
-        # ── Assemble outputs (per-format error isolation) ────────────────────
-        output_paths = {}
-        format_errors = []
-        n = len(output_formats)
-
-        if "epub" in output_formats:
-            i = output_formats.index("epub")
-            update_job(r, job_id, message="Assembling EPUB…", progress=87 + int(i/n*10))
-            try:
-                p = OUTPUT_DIR / f"{job_id}.epub"
-                assemble_epub(structure, p, writing_mode_override=WRITING_MODE)
-                output_paths["epub_path"] = str(p)
-            except Exception as e:
-                logger.error(f"EPUB assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
-                format_errors.append(f"EPUB: {e}")
-
-        if "textlayer" in output_formats:
-            i = output_formats.index("textlayer")
-            update_job(r, job_id, message="Building searchable PDF…", progress=87 + int(i/n*10))
-            try:
-                p = OUTPUT_DIR / f"{job_id}_searchable.pdf"
-                # Pass the same DPI used during rasterisation so each
-                # element's pixel-space bbox can be converted back to PDF
-                # point space — this is what lets text selection in the
-                # resulting PDF pick up the correct text region.
-                assemble_textlayer_pdf(structure, pdf_path, p, dpi=DPI)
-                output_paths["textlayer_path"] = str(p)
-            except Exception as e:
-                logger.error(f"Text-layer PDF assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
-                format_errors.append(f"Searchable PDF: {e}")
-
-        if "clean" in output_formats:
-            i = output_formats.index("clean")
-            update_job(r, job_id, message="Building clean PDF…", progress=87 + int(i/n*10))
-            try:
-                p = OUTPUT_DIR / f"{job_id}_clean.pdf"
-                assemble_clean_pdf(structure, p)
-                output_paths["clean_pdf_path"] = str(p)
-            except Exception as e:
-                logger.error(f"Clean PDF assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
-                format_errors.append(f"Clean PDF: {e}")
+        # ── Assemble clean PDF ───────────────────────────────────────────────
+        update_job(r, job_id, message="Building clean PDF…", progress=87)
+        clean_pdf_path = None
+        assembly_error = None
+        try:
+            p = OUTPUT_DIR / f"{job_id}_clean.pdf"
+            assemble_clean_pdf(structure, p)
+            clean_pdf_path = str(p)
+        except Exception as e:
+            logger.error(f"Clean PDF assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
+            assembly_error = str(e)
 
         # ── Determine final status ───────────────────────────────────────────
-        if output_paths:
-            # At least one format succeeded — clear OCR cache
+        if clean_pdf_path:
             removed = _clear_ocr_cache(r, job_id)
             if removed:
                 logger.info(f"Job {job_id}: cleared {removed} cached OCR pages")
-
-            if format_errors:
-                error_summary = "; ".join(format_errors)
-                update_job(r, job_id, status="done",
-                           message=f"Partial success ({len(format_errors)} format(s) failed)",
-                           progress=100, error=error_summary, **output_paths)
-                logger.warning(f"Job {job_id} partial: {error_summary}")
-            else:
-                update_job(r, job_id, status="done", message="Complete",
-                           progress=100, **output_paths)
-                logger.info(f"Job {job_id} done: {list(output_paths.keys())}")
+            update_job(r, job_id, status="done", message="Complete",
+                       progress=100, clean_pdf_path=clean_pdf_path)
+            logger.info(f"Job {job_id} done: clean_pdf_path")
         else:
-            # All formats failed — KEEP the OCR cache
-            error_summary = "; ".join(format_errors) if format_errors else "No output produced"
             update_job(r, job_id, status="failed",
-                       message="Conversion failed.", error=error_summary)
-            logger.error(f"Job {job_id} failed: all formats errored: {error_summary}")
+                       message="Conversion failed.", error=assembly_error or "No output produced")
+            logger.error(f"Job {job_id} failed: {assembly_error}")
 
     except Exception as exc:
         logger.error(f"Job {job_id} failed: {exc}\n{traceback.format_exc()}")

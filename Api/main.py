@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     t.start()
     yield
 
-app = FastAPI(title="PDF→EPUB Converter", lifespan=lifespan)
+app = FastAPI(title="PDF→Clean PDF Converter", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=_HTTPS_ONLY)
 app.add_middleware(
     CORSMiddleware,
@@ -156,7 +156,6 @@ async def index(request: Request):
 async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
-    output_formats: str = Form("epub"),
     user: str = Depends(require_auth),
 ):
     if not file.filename.lower().endswith(".pdf"):
@@ -165,9 +164,7 @@ async def upload_pdf(
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File exceeds {CFG['pipeline']['max_pdf_size_mb']}MB limit.")
 
-    formats = [f.strip() for f in output_formats.split(",") if f.strip()]
-    valid = {"epub", "textlayer", "clean"}
-    formats = [f for f in formats if f in valid] or ["epub"]
+    formats = ["clean"]
 
     job_id   = str(uuid.uuid4())
     pdf_path = UPLOAD_DIR / f"{job_id}.pdf"
@@ -191,8 +188,6 @@ async def upload_pdf(
         "message":         "Waiting to start",
         "created_at":      int(time.time()),
         "pdf_path":        str(pdf_path),
-        "epub_path":       "",
-        "textlayer_path":  "",
         "clean_pdf_path":  "",
         "error":           "",
         "stop_requested":  False,
@@ -234,40 +229,6 @@ async def job_history(user: str = Depends(require_auth)):
     await r.aclose()
     return JSONResponse(jobs)
 
-# ── Download: EPUB ────────────────────────────────────────────────────────────
-@app.get("/api/download/{job_id}")
-async def download_epub(job_id: str, user: str = Depends(require_auth)):
-    r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    await r.aclose()
-    if not raw:
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    if job["status"] != "done":
-        raise HTTPException(400, "Job not complete.")
-    p = Path(job.get("epub_path", ""))
-    if not p.exists():
-        raise HTTPException(404, "EPUB file not found.")
-    return FileResponse(str(p), media_type="application/epub+zip",
-                        filename=f"{Path(job['filename']).stem}.epub")
-
-# ── Download: Text-layer PDF ─────────────────────────────────────────────────
-@app.get("/api/download/{job_id}/textlayer")
-async def download_textlayer(job_id: str, user: str = Depends(require_auth)):
-    r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    await r.aclose()
-    if not raw:
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    if job["status"] != "done":
-        raise HTTPException(400, "Job not complete.")
-    p = Path(job.get("textlayer_path", ""))
-    if not p.exists():
-        raise HTTPException(404, "Searchable PDF not found.")
-    return FileResponse(str(p), media_type="application/pdf",
-                        filename=f"{Path(job['filename']).stem}_searchable.pdf")
-
 # ── Download: Clean PDF ──────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}/clean")
 async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
@@ -287,7 +248,7 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
 
 # ── Start / Pause / Stop / Delete ────────────────────────────────────────────
 @app.post("/api/start/{job_id}")
-async def start_job(job_id: str, request: Request, user: str = Depends(require_auth)):
+async def start_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
@@ -298,20 +259,7 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         await r.aclose()
         raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    if isinstance(body, dict) and "output_formats" in body:
-        valid = {"epub", "textlayer", "clean"}
-        new_fmts = [f.strip() for f in body["output_formats"]
-                    if isinstance(f, str) and f.strip() in valid]
-        if new_fmts:
-            job["output_formats"] = new_fmts
-
-    job["epub_path"] = ""
-    job["textlayer_path"] = ""
+    job["output_formats"] = ["clean"]
     job["clean_pdf_path"] = ""
 
     job.update(status="queued", message="Queued", progress=0, error="",
@@ -387,7 +335,7 @@ async def delete_job(job_id: str, user: str = Depends(require_auth)):
         raise HTTPException(400, "Stop it first.")
     if job["status"] == "queued":
         await r.lrem("job_queue", 0, job_id)
-    for key in ("pdf_path", "epub_path", "textlayer_path", "clean_pdf_path"):
+    for key in ("pdf_path", "clean_pdf_path"):
         try:
             p = Path(job.get(key, ""))
             if p.exists():

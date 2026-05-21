@@ -144,24 +144,7 @@
     <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
     <!-- Format picker shown after upload, hidden once job starts -->
     <div id="format-section" style="display:none">
-      <div class="format-label">Output formats</div>
-      <div class="format-picker" id="format-picker">
-        <label class="format-option">
-          <input type="checkbox" value="epub"/>
-          EPUB
-          <span class="format-desc">E-reader format</span>
-        </label>
-        <label class="format-option">
-          <input type="checkbox" value="textlayer" checked/>
-          Searchable PDF
-          <span class="format-desc">Original + text layer</span>
-        </label>
-        <label class="format-option">
-          <input type="checkbox" value="clean"/>
-          Clean PDF
-          <span class="format-desc">Re-typeset text</span>
-        </label>
-      </div>
+      <div class="format-label">Output format: Clean PDF</div>
     </div>
     <div id="progress-actions"></div>
   </div>
@@ -189,15 +172,11 @@ function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLoc
 
 /* ── Format helpers ── */
 const FORMAT_LABELS = {
-  epub:      'EPUB',
-  textlayer: 'Searchable PDF',
-  clean:     'Clean PDF',
+  clean: 'Clean PDF',
 };
 
 function getSelectedFormats(){
-  const cbs=document.querySelectorAll('#format-picker input[type="checkbox"]:checked');
-  const f=Array.from(cbs).map(c=>c.value);
-  return f.length?f:['epub'];
+  return ['clean'];
 }
 
 /* ── Drag & drop ── */
@@ -300,12 +279,7 @@ async function pollStatus(id){
 function buildDownloadButtons(job){
   const id=esc(job.job_id);
   let btns=[];
-  const fmts=job.output_formats||['epub'];
-  if(fmts.includes('epub')&&job.epub_path)
-    btns.push(`<a class="download-btn" href="/api/download/${id}" download>↓ EPUB</a>`);
-  if(fmts.includes('textlayer')&&job.textlayer_path)
-    btns.push(`<a class="download-btn secondary" href="/api/download/${id}/textlayer" download>↓ Searchable PDF</a>`);
-  if(fmts.includes('clean')&&job.clean_pdf_path)
+  if(job.clean_pdf_path)
     btns.push(`<a class="download-btn secondary" href="/api/download/${id}/clean" download>↓ Clean PDF</a>`);
   btns.push(`<button class="action-btn btn-delete" data-action="delete-current" data-job-id="${id}">✕</button>`);
   return btns.join(' ');
@@ -344,33 +318,19 @@ function updateProgressUI(job){
    ══════════════════════════════════════════════════════════════════════════ */
 
 function buildFormatTags(job) {
-  const fmts = job.output_formats || ['epub'];
-  return fmts.map(f => {
-    const label = FORMAT_LABELS[f] || f;
-    let cls = 'format-tag';
-    if (job.status === 'done') {
-      const pathKey = f === 'epub' ? 'epub_path' : f === 'textlayer' ? 'textlayer_path' : 'clean_pdf_path';
-      if (job[pathKey]) {
-        cls += ' ready';
-      } else {
-        cls += ' failed-tag';
-      }
-    }
-    return `<span class="${cls}">${esc(label)}</span>`;
-  }).join('');
+  const label = FORMAT_LABELS['clean'];
+  let cls = 'format-tag';
+  if (job.status === 'done') {
+    cls += job.clean_pdf_path ? ' ready' : ' failed-tag';
+  }
+  return `<span class="${cls}">${esc(label)}</span>`;
 }
 
 function buildHistoryDownloadLinks(job) {
   const id = esc(job.job_id);
-  let links = [];
-  const fmts = job.output_formats || ['epub'];
-  if (fmts.includes('epub') && job.epub_path)
-    links.push(`<a class="dl-link" href="/api/download/${id}" download>↓ EPUB</a>`);
-  if (fmts.includes('textlayer') && job.textlayer_path)
-    links.push(`<a class="dl-link secondary" href="/api/download/${id}/textlayer" download>↓ Searchable PDF</a>`);
-  if (fmts.includes('clean') && job.clean_pdf_path)
-    links.push(`<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Clean PDF</a>`);
-  return links.join('');
+  if (job.clean_pdf_path)
+    return `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Clean PDF</a>`;
+  return '';
 }
 
 function renderHistoryCard(job) {
