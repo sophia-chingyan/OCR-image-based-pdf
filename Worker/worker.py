@@ -264,10 +264,9 @@ def cleanup_expired_files(r):
     for f in UPLOAD_DIR.glob("*.pdf"):
         if now - f.stat().st_mtime > ur:
             f.unlink(missing_ok=True)
-    for ext in ("*.epub", "*.pdf"):
-        for f in OUTPUT_DIR.glob(ext):
-            if now - f.stat().st_mtime > orr:
-                f.unlink(missing_ok=True)
+    for f in OUTPUT_DIR.glob("*.pdf"):
+        if now - f.stat().st_mtime > orr:
+            f.unlink(missing_ok=True)
 
 
 def main():

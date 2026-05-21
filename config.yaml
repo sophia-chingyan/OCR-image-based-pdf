@@ -15,11 +15,6 @@ pipeline:
   output_retention_days: 7
   tmp_cleanup_on_complete: true
 
-epub:
-  default_writing_mode: auto
-  embed_page_numbers: true
-  chapter_per_page: true
-
 server:
   max_concurrent_jobs: 1
   port: 8080

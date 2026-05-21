@@ -12,7 +12,6 @@ outputs/
 tmp-work/
 models/
 Models/
-*.epub
 *.pdf
 *.tar.gz
 README.md

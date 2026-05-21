@@ -1,11 +1,11 @@
 # System Specification Document
-## PDF to EPUB Converter — v2.0
+## PDF to Clean PDF Converter — v2.0
 
 ---
 
 ### 1. Project Overview
 
-A self-hosted, single-user web application that converts image-based PDF files into multiple readable output formats. Protected by Google OAuth2 authentication with email allowlist. The system performs OCR via Google Gemini, preserves document structure, re-embeds images, retains hyperlinks, and correctly handles horizontal and vertical CJK (Traditional Chinese, Simplified Chinese, Japanese, Korean) and English text. Deployed on Zeabur as a **single container** — no Redis service required.
+A self-hosted, single-user web application that converts image-based PDF files into clean, re-typeset PDF output. Protected by Google OAuth2 authentication with email allowlist. The system performs OCR via Google Gemini, preserves document structure, re-embeds images, retains hyperlinks, and correctly handles horizontal and vertical CJK (Traditional Chinese, Simplified Chinese, Japanese, Korean) and English text. Deployed on Zeabur as a **single container** — no Redis service required.
 
 ---
 
@@ -45,13 +45,10 @@ The entire application runs as **one container, one process**. The FastAPI API a
 │  │  /api/stop/{id}          │  │  3. Gemini OCR (1 call/page) │ │
 │  │  /api/delete/{id}        │  │  4. Structure analysis       │ │
 │  │  /api/status/{id}        │  │  5. Assemble outputs         │ │
-│  │  /api/history            │  │     - EPUB                   │ │
-│  │  /api/download/{id}      │  │     - Searchable PDF         │ │
-│  │  /api/download/{id}/     │  │     - Clean PDF              │ │
-│  │    textlayer             │  │                              │ │
-│  │  /api/download/{id}/     │  │  Reads/writes job state      │ │
-│  │    clean                 │  │  via get_sync_redis()        │ │
-│  │  /health                 │  │                              │ │
+│  │  /api/history            │  │  5. Assemble clean PDF       │ │
+│  │  /api/download/{id}/     │  │                              │ │
+│  │    clean                 │  │  Reads/writes job state      │ │
+│  │  /health                 │  │  via get_sync_redis()        │ │
 │  └─────────────┬────────────┘  └──────────────┬───────────────┘ │
 │                │                              │                  │
 │                └──────────┬───────────────────┘                  │
@@ -165,23 +162,15 @@ Token valid in store? ──No──►              │
 
 ---
 
-### 6. Output Formats
+### 6. Output Format
 
-The user selects one or more output formats before starting a conversion. All selected formats are produced from a single OCR pass.
+The single output format is a clean, re-typeset PDF produced from one OCR pass.
 
 | Format | Internal key | Output file | Description |
 |---|---|---|---|
-| EPUB | `epub` | `{job_id}.epub` | EPUB 3 with per-page `writing-mode` CSS, images, TOC, NCX/NAV |
-| Searchable PDF | `textlayer` | `{job_id}_searchable.pdf` | Original PDF pages with invisible OCR text overlaid — visually identical, fully searchable |
 | Clean PDF | `clean` | `{job_id}_clean.pdf` | OCR text re-typeset into a fresh PDF using ReportLab with proper CJK typography |
 
-**Format selection UI:** Checkboxes shown in the progress panel after upload. Default: EPUB unchecked, Searchable PDF checked, Clean PDF unchecked.
-
-**Format field in API:** `POST /api/upload` accepts `output_formats` as a comma-separated form field (e.g. `epub,textlayer`). The API validates against `{"epub", "textlayer", "clean"}` and falls back to `["epub"]` if empty.
-
-**Download endpoints:**
-- `GET /api/download/{job_id}` — EPUB
-- `GET /api/download/{job_id}/textlayer` — Searchable PDF
+**Download endpoint:**
 - `GET /api/download/{job_id}/clean` — Clean PDF
 
 ---
@@ -252,24 +241,7 @@ The user selects one or more output formats before starting a conversion. All se
 - Match hyperlinks to text blocks by bounding box overlap
 - Build `StructuredPage` list with `StructuredElement` and `StructuredImage` objects
 
-**Step 5 — Assemble Selected Output Formats**
-
-**EPUB (`epub_assembly.py`):**
-- One EPUB chapter per PDF page
-- Per-page `writing-mode` CSS: `vertical-rl` for vertical, `horizontal-tb` for horizontal
-- Images re-embedded as EPUB media items
-- NCX and NAV generated for TOC
-- Placeholder chapter inserted if no content extracted
-
-**Searchable PDF (`pdf_assembly.py → assemble_textlayer_pdf`):**
-- Opens original PDF with PyMuPDF
-- Overlays OCR text as invisible white `render_mode=3` text
-- Uses PyMuPDF's `TextWriter` with `china-s` CJK font
-- Text distributed vertically across each page by element index
-- Visual appearance of original PDF is completely unchanged
-- Output is fully searchable and copy-pasteable
-
-**Clean PDF (`pdf_assembly.py → assemble_clean_pdf`):**
+**Step 5 — Assemble Clean PDF (`pdf_assembly.py → assemble_clean_pdf`)**
 - Re-typesets all OCR text into a new A4 PDF using ReportLab
 - Registers CJK font (`STSong-Light` or `MSung-Light`, falls back to `Helvetica`)
 - Maps element types to ReportLab styles: headings, body, footnotes, captions, list items
@@ -279,7 +251,7 @@ The user selects one or more output formats before starting a conversion. All se
 **Step 6 — Cleanup**
 - `/app/tmp-work/{job_id}/` deleted immediately after assembly
 - `/app/uploads/*.pdf` deleted after `upload_retention_hours`
-- `/app/outputs/*.epub` and `*.pdf` deleted after `output_retention_days`
+- `/app/outputs/*.pdf` deleted after `output_retention_days`
 
 ---
 
@@ -316,14 +288,12 @@ Upload (PDF saved, page count read, job record created)
 | `message` | Human-readable status message |
 | `created_at` | Unix timestamp |
 | `pdf_path` | Path to uploaded PDF |
-| `epub_path` | Path to EPUB output (if requested and succeeded) |
-| `textlayer_path` | Path to searchable PDF output (if requested and succeeded) |
-| `clean_pdf_path` | Path to clean PDF output (if requested and succeeded) |
-| `error` | Error message if `status == failed` (or partial failure details) |
+| `clean_pdf_path` | Path to clean PDF output |
+| `error` | Error message if `status == failed` |
 | `stop_requested` | Boolean flag — checked by Worker per page |
 | `pause_requested` | Boolean flag — checked by Worker per page |
 | `page_count` | Total PDF pages (set on upload) |
-| `output_formats` | List of selected formats e.g. `["epub", "textlayer"]` |
+| `output_formats` | Always `["clean"]` |
 
 ---
 
@@ -338,16 +308,14 @@ Upload (PDF saved, page count read, job record created)
 
 **UI features:**
 - Drag-and-drop or file picker (max 100 MB, PDF only)
-- Output format checkboxes: EPUB, Searchable PDF ✓, Clean PDF
 - Upload → receive Job ID → show Start / Delete buttons
-- Format picker shown after upload, hidden once job starts
 - Click **Start** → job queued → progress bar with 5-second polling
-- Progress message: `OCR page X / Y…` then `Assembling EPUB…` etc.
+- Progress message: `OCR page X / Y…` then `Building clean PDF…`
 - Pause / Resume support with progress preserved
-- Per-format download buttons when done: `↓ EPUB`, `↓ Searchable PDF`, `↓ Clean PDF`
+- Download button when done: `↓ Clean PDF`
 - Stop button during processing
 - Retry + Delete on failure
-- Job history cards: filename, pages, status, created date, format tags, actions
+- Job history cards: filename, pages, status, created date, actions
 - Sign out link
 
 ---
@@ -367,8 +335,6 @@ Upload (PDF saved, page count read, job record created)
 | `POST` | `/api/pause/{id}` | ✓ | Request pause of queued/processing job |
 | `POST` | `/api/stop/{id}` | ✓ | Request stop of queued/processing job |
 | `DELETE` | `/api/delete/{id}` | ✓ | Delete job record and associated files |
-| `GET` | `/api/download/{id}` | ✓ | Download EPUB |
-| `GET` | `/api/download/{id}/textlayer` | ✓ | Download searchable PDF |
 | `GET` | `/api/download/{id}/clean` | ✓ | Download clean PDF |
 | `GET` | `/health` | — | Health check (Redis ping) |
 
@@ -394,11 +360,6 @@ pipeline:
   output_retention_days: 7
   tmp_cleanup_on_complete: true
 
-epub:
-  default_writing_mode: auto            # auto | horizontal | vertical
-  embed_page_numbers: true
-  chapter_per_page: true
-
 server:
   max_concurrent_jobs: 1
   port: 8080
@@ -414,9 +375,8 @@ server:
 | API & Web Server | FastAPI (Python 3.11) | Single process with Worker thread |
 | OAuth2 Client | Authlib | Google OAuth2, dynamic callback URL |
 | OCR Engine | Google Gemini (`gemini-2.5-flash-lite`) | Via `google-genai` SDK |
-| PDF Processing | PyMuPDF (fitz) | Ingestion, rasterization, text-layer PDF |
+| PDF Processing | PyMuPDF (fitz) | Ingestion, rasterization |
 | Image Processing | OpenCV (`opencv-python-headless`) | BGR conversion |
-| EPUB Assembly | EbookLib | EPUB 3, NCX, NAV |
 | PDF Re-typesetting | ReportLab | Clean PDF output with CJK font support |
 | Store | fakeredis (default) / Redis | In-process by default, external optional |
 | Session Storage | fakeredis / Redis | Persistent until logout |
@@ -487,7 +447,7 @@ Comfortably fits on the **$3/mo (4 GB)** Zeabur plan.
 ### 17. Project Structure
 
 ```
-pdf2epub/
+ocr-pdf/
 ├── Dockerfile              # Single-container build (API + Worker)
 ├── docker-compose.yml      # Local dev only
 ├── zbpack.json             # Zeabur build config
@@ -500,7 +460,7 @@ pdf2epub/
 ├── Api/
 │   ├── main.py             # FastAPI app — routes, auth, job control
 │   └── static/
-│       ├── index.html      # Production UI: format picker, multi-download, history cards
+│       ├── index.html      # Production UI: upload, progress, download, history cards
 │       └── login.html      # Login: Google OAuth only
 │
 └── Worker/
@@ -510,8 +470,7 @@ pdf2epub/
     ├── gemini_engine.py    # Gemini API integration, rate limiting, caching
     ├── pdf_ingestion.py    # PyMuPDF: images, links, metadata, rasterization
     ├── structure_analysis.py  # OCR blocks → headings/paragraphs/etc.
-    ├── epub_assembly.py    # EbookLib: EPUB 3 output
-    └── pdf_assembly.py     # PyMuPDF + ReportLab: text-layer and clean PDF
+    └── pdf_assembly.py     # ReportLab: clean PDF output
 ```
 
 ---
@@ -524,5 +483,4 @@ pdf2epub/
 - Table structure recognition (tables treated as images)
 - RTL language support (Arabic, Hebrew)
 - Translation between languages
-- EPUB to PDF reverse conversion
 - Batch upload (multiple PDFs at once)

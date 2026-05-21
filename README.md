@@ -1,11 +1,11 @@
-# PDF → EPUB Converter
+# PDF → Clean PDF Converter
 
-Self-hosted, single-user web app that converts **image-based PDF files** to readable EPUB files using **Google Gemini** for OCR.
+Self-hosted, single-user web app that converts **image-based PDF files** to clean, re-typeset PDF files using **Google Gemini** for OCR.
 
 - ✅ OCR via Google Gemini (`gemini-2.5-flash` by default)
 - ✅ Languages: Traditional Chinese, Simplified Chinese, Japanese, Korean, English (and 100+ others)
 - ✅ Auto-detects horizontal / vertical text layout per page
-- ✅ EPUB with CSS `writing-mode: vertical-rl` for vertical pages
+- ✅ Clean PDF with correct CJK font/CMap per detected language
 - ✅ Re-embeds images, preserves hyperlinks, headings, TOC, footnotes, page numbers
 - ✅ Async job queue with Start / Stop / Delete / Retry controls
 - ✅ Google OAuth2 authentication (single-user, allowlist by email)
@@ -150,11 +150,6 @@ pipeline:
   upload_retention_hours: 24
   output_retention_days: 7
 
-epub:
-  default_writing_mode: auto      # auto | horizontal | vertical
-  embed_page_numbers: true
-  chapter_per_page: true
-
 server:
   max_concurrent_jobs: 1
   port: 8000
@@ -190,7 +185,7 @@ Easily fits on the **$3/mo (4 GB)** Zeabur plan now that PaddleOCR/Surya are gon
 ## Project Structure
 
 ```
-pdf2epub/
+ocr-pdf/
 ├── Dockerfile              # single-container build (API + Worker merged)
 ├── docker-compose.yml      # local dev — single service, no Redis
 ├── requirements.txt        # merged deps for API + Worker
@@ -212,7 +207,7 @@ pdf2epub/
     ├── gemini_engine.py    # ⭐ the Gemini API integration
     ├── pdf_ingestion.py    # PyMuPDF
     ├── structure_analysis.py # text → headings / paragraphs / footnotes / …
-    └── epub_assembly.py    # EbookLib
+    └── pdf_assembly.py     # ReportLab / PyMuPDF: clean PDF output
 ```
 
 ---
