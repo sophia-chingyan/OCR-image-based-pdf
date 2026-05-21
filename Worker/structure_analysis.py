@@ -2,7 +2,7 @@
 Structure Analysis
 ==================
 Converts raw OCR TextBlocks + LayoutBlocks into a structured document model
-ready for EPUB / PDF assembly.
+ready for PDF assembly.
 
 Changes from original:
 - DocumentStructure gains `dominant_language` field (e.g. "ch_tra", "ch_sim",
@@ -49,7 +49,7 @@ class StructuredElement:
 class StructuredImage:
     image_bytes: bytes
     ext: str
-    epub_id: str               # unique ID for EPUB media item
+    epub_id: str               # unique ID for image media item
     alt_text: str = ""
 
 
