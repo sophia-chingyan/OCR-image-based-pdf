@@ -254,7 +254,7 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         body = await request.json()
     except Exception:
         pass
-    language_hints = body.get("language_hints") if isinstance(body, dict) else None
+    language_hints = body.get("language_hints")
     if not isinstance(language_hints, list):
         language_hints = []
 

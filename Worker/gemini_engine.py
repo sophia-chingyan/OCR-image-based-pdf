@@ -314,14 +314,13 @@ class GeminiOCREngine(OCREngine):
         """Return the OCR prompt, optionally extended with a language hint line."""
         if not self._language_hints:
             return _OCR_PROMPT_BASE
-        labels = [LANGUAGE_HINT_LABELS[h] for h in self._language_hints]
+        labels = ", ".join(LANGUAGE_HINT_LABELS[h] for h in self._language_hints)
         hint_line = (
-            "- Language priority: This document is expected to primarily contain "
-            + ", ".join(labels)
-            + ". Prioritize recognition of these languages and scripts, "
-            "but still recognize all text accurately."
+            f"- Language priority: This document is expected to primarily contain {labels}."
+            " Prioritize recognition of these languages and scripts,"
+            " but still recognize all text accurately.\n"
         )
-        return _OCR_PROMPT_BASE + hint_line + "\n"
+        return _OCR_PROMPT_BASE + hint_line
 
     def reset_page_cache(self):
         """
