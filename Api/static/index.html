@@ -70,27 +70,13 @@
     .history-card-meta{font-family:'DM Mono',monospace;font-size:.68rem;color:var(--muted);letter-spacing:.04em;display:flex;flex-wrap:wrap;gap:.3rem .8rem}
     .history-card-right{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
 
-    .status-badge{display:inline-block;padding:.15rem .5rem;font-family:'DM Mono',monospace;font-size:.65rem;letter-spacing:.06em;text-transform:uppercase;font-weight:500}
-    .status-badge.queued{background:#eee8dc;color:var(--muted)}
-    .status-badge.processing{background:#fef3cd;color:#856404}
-    .status-badge.done{background:#d4edda;color:var(--green)}
-    .status-badge.failed{background:#f8d7da;color:var(--red)}
-    .status-badge.pending{background:#e8e8ff;color:#4444aa}
-    .status-badge.stopped{background:#ffe8e8;color:#aa4444}
-    .status-badge.paused{background:#dbeafe;color:var(--blue)}
-
-    /* ── Processing detail row ── */
-    .history-card-detail{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted);margin-bottom:.6rem;letter-spacing:.03em}
-    .history-card-detail .detail-message{color:var(--ink)}
-    .history-card-progress{height:3px;background:var(--border);margin-bottom:.6rem;overflow:hidden;border-radius:1px}
-    .history-card-progress-fill{height:100%;background:var(--red);transition:width .4s ease}
-    .history-card-progress-fill.indeterminate{width:40%!important;animation:slide 1.4s infinite}
-
-    /* ── Format tags ── */
-    .format-tags{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.6rem}
-    .format-tag{font-family:'DM Mono',monospace;font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;padding:.15rem .45rem;border:1px solid var(--border);color:var(--muted);background:var(--paper)}
-    .format-tag.ready{border-color:var(--green);color:var(--green);background:#edf7f1}
-    .format-tag.failed-tag{border-color:var(--red);color:var(--red);background:#fdf0ee;text-decoration:line-through}
+    /* ── Working status indicator (New Conversion panel) ── */
+    .working-status{display:none;align-items:center;gap:.6rem;margin-bottom:.75rem;padding:.55rem .8rem;background:#fef3cd;border-left:3px solid var(--amber)}
+    .working-status.visible{display:flex}
+    .working-dot{width:8px;height:8px;border-radius:50%;background:var(--amber);flex-shrink:0;animation:pulse-dot 1.2s ease-in-out infinite}
+    @keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+    .working-label{font-family:'DM Mono',monospace;font-size:.72rem;font-weight:500;color:#856404;letter-spacing:.06em;text-transform:uppercase}
+    .working-step{font-family:'DM Mono',monospace;font-size:.7rem;color:#856404;opacity:.8;margin-left:.25rem}
 
     /* ── Action buttons row ── */
     .history-card-actions{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
@@ -108,9 +94,6 @@
     .empty-history{font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);padding:1.5rem 0;text-align:center;letter-spacing:.05em}
     .toast{position:fixed;bottom:2rem;right:2rem;background:var(--ink);color:var(--paper);padding:.75rem 1.25rem;font-family:'DM Mono',monospace;font-size:.78rem;letter-spacing:.05em;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s;z-index:200;pointer-events:none}
     .toast.show{opacity:1;transform:translateY(0)}
-
-    /* ── Error in history card ── */
-    .history-card-error{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--red);background:#fdf0ee;border-left:3px solid var(--red);padding:.4rem .6rem;margin-bottom:.6rem}
   </style>
 </head>
 <body>
@@ -142,6 +125,11 @@
     <div class="progress-file">
       <span class="progress-file-icon">📄</span>
       <span id="progress-filename">—</span>
+    </div>
+    <div id="working-status" class="working-status">
+      <span class="working-dot"></span>
+      <span class="working-label">OCR Processing</span>
+      <span class="working-step" id="working-step"></span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:baseline">
       <div class="progress-message" id="progress-message">Starting…</div>
@@ -183,7 +171,8 @@ const dropZone=$('drop-zone'),fileInput=$('file-input'),progressPanel=$('progres
   progressBar=$('progress-bar'),progressMsg=$('progress-message'),progressPct=$('progress-pct'),
   progressFn=$('progress-filename'),progressActs=$('progress-actions'),
   historyContent=$('history-content'),toast=$('toast'),
-  formatSection=$('format-section');
+  formatSection=$('format-section'),
+  workingStatus=$('working-status'),workingStep=$('working-step');
 
 function showToast(m,d=3000){toast.textContent=m;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),d)}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -315,6 +304,9 @@ function updateProgressUI(job){
   progressMsg.textContent=job.message||job.status;
   const pct=job.progress||0;progressPct.textContent=`${pct}%`;progressBar.style.width=`${pct}%`;
   if(job.status==='queued')progressBar.classList.add('indeterminate');else progressBar.classList.remove('indeterminate');
+  const isProcessing=['queued','processing'].includes(job.status);
+  if(isProcessing){workingStatus.classList.add('visible');workingStep.textContent=job.message?`· ${job.message}`:'';}
+  else{workingStatus.classList.remove('visible');workingStep.textContent='';}
   progressActs.innerHTML='';const id=esc(job.job_id);
   if(job.status==='done'){
     formatSection.style.display='none';
@@ -343,87 +335,14 @@ function updateProgressUI(job){
    HISTORY — card-based layout with full detail
    ══════════════════════════════════════════════════════════════════════════ */
 
-function buildFormatTags(job) {
-  const label = FORMAT_LABELS['clean'];
-  let cls = 'format-tag';
-  if (job.status === 'done') {
-    cls += job.clean_pdf_path ? ' ready' : ' failed-tag';
-  }
-  return `<span class="${cls}">${esc(label)}</span>`;
-}
-
-function buildHistoryDownloadLinks(job) {
-  const id = esc(job.job_id);
-  if (job.clean_pdf_path)
-    return `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Clean PDF</a>`;
-  return '';
-}
-
 function renderHistoryCard(job) {
   const id = esc(job.job_id);
   const pages = job.page_count ? `${job.page_count} pp` : '—';
   const created = fmtDate(job.created_at);
-  const formatTags = buildFormatTags(job);
-  const isActive = ['queued', 'processing'].includes(job.status);
-  const pct = job.progress || 0;
 
-  let detailHTML = '';
-  let progressHTML = '';
-  let actionsHTML = '';
-  let errorHTML = '';
-
-  if (isActive) {
-    const msg = job.message || job.status;
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">${esc(msg)}</span> · ${pct}%
-    </div>`;
-    const barCls = job.status === 'queued' ? 'history-card-progress-fill indeterminate' : 'history-card-progress-fill';
-    progressHTML = `<div class="history-card-progress">
-      <div class="${barCls}" style="width:${pct}%"></div>
-    </div>`;
-  } else if (job.status === 'done') {
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">Complete</span> · ${pages}
-    </div>`;
-  } else if (job.status === 'failed') {
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">Failed</span> · ${pages}
-    </div>`;
-    if (job.error) {
-      errorHTML = `<div class="history-card-error">${esc(job.error)}</div>`;
-    }
-  } else if (job.status === 'stopped') {
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">Stopped by user</span> · ${pages}
-    </div>`;
-  } else if (job.status === 'paused') {
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">Paused by user</span> · ${pages} · ${pct}%
-    </div>`;
-  } else if (job.status === 'pending') {
-    detailHTML = `<div class="history-card-detail">
-      <span class="detail-message">Waiting to start</span> · ${pages}
-    </div>`;
-  }
-
-  if (job.status === 'done') {
-    const dlLinks = buildHistoryDownloadLinks(job);
-    actionsHTML = `<div class="history-card-actions">
-      ${dlLinks}
-      <button class="action-btn btn-delete" data-action="history-delete" data-job-id="${id}" title="Delete job and files">✕</button>
-    </div>`;
-  } else if (['pending', 'stopped', 'failed', 'paused'].includes(job.status)) {
-    const label = job.status === 'pending' ? '▶ Start' : job.status === 'paused' ? '▶ Resume' : job.status === 'stopped' ? '▶ Restart' : '▶ Retry';
-    actionsHTML = `<div class="history-card-actions">
-      <button class="action-btn btn-start" data-action="history-start" data-job-id="${id}">${label}</button>
-      <button class="action-btn btn-delete" data-action="history-delete" data-job-id="${id}" title="Delete job and files">✕</button>
-    </div>`;
-  } else if (isActive) {
-    actionsHTML = `<div class="history-card-actions">
-      <button class="action-btn btn-pause" data-action="history-pause" data-job-id="${id}">⏸ Pause</button>
-      <button class="action-btn btn-stop" data-action="history-stop" data-job-id="${id}">⏹ Stop</button>
-    </div>`;
-  }
+  const dlLink = (job.status === 'done' && job.clean_pdf_path)
+    ? `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Download</a>`
+    : '';
 
   return `<div class="history-card" data-job-id="${id}">
     <div class="history-card-header">
@@ -435,14 +354,12 @@ function renderHistoryCard(job) {
         </div>
       </div>
       <div class="history-card-right">
-        <span class="status-badge ${esc(job.status)}">${esc(job.status)}</span>
+        <div class="history-card-actions">
+          ${dlLink}
+          <button class="action-btn btn-delete" data-action="history-delete" data-job-id="${id}" aria-label="Delete job and files">✕ Delete</button>
+        </div>
       </div>
     </div>
-    ${detailHTML}
-    ${progressHTML}
-    <div class="format-tags">${formatTags}</div>
-    ${errorHTML}
-    ${actionsHTML}
   </div>`;
 }
 
@@ -480,40 +397,6 @@ async function resumeActiveJobs() {
 }
 
 /* ── History actions ── */
-async function historyStartJob(id) {
-  currentJobId = id;
-  progressPanel.style.display = 'block';
-  try {
-    const r = await fetch(`/api/status/${id}`);
-    if (r.ok) {
-      const j = await r.json();
-      progressFn.textContent = j.filename || '';
-    }
-  } catch(_) {}
-  progressMsg.textContent = 'Choose formats, then start';
-  progressPct.textContent = '';
-  progressBar.style.width = '0%';
-  progressActs.innerHTML = '';
-  formatSection.style.display = 'block';
-  renderPendingActions(id);
-}
-
-async function historyPauseJob(id) {
-  try {
-    await fetch(`/api/pause/${id}`, {method: 'POST'});
-    showToast('Pause requested.');
-    loadHistory();
-  } catch(e) { showToast(e.message); }
-}
-
-async function historyStopJob(id) {
-  try {
-    await fetch(`/api/stop/${id}`, {method: 'POST'});
-    showToast('Stop requested.');
-    loadHistory();
-  } catch(e) { showToast(e.message); }
-}
-
 async function historyDeleteJob(id) {
   if (!confirm('Delete this job and its files?')) return;
   try {
@@ -537,9 +420,6 @@ document.addEventListener('click', e => {
   else if (a === 'pause') pauseJob(id);
   else if (a === 'stop') stopJob(id);
   else if (a === 'delete-current') deleteJob(id, true);
-  else if (a === 'history-start') historyStartJob(id);
-  else if (a === 'history-pause') historyPauseJob(id);
-  else if (a === 'history-stop') historyStopJob(id);
   else if (a === 'history-delete') historyDeleteJob(id);
 });
 
