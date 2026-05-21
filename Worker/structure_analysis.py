@@ -49,7 +49,7 @@ class StructuredElement:
 class StructuredImage:
     image_bytes: bytes
     ext: str
-    epub_id: str               # unique ID for image media item
+    image_id: str              # unique ID for image media item
     alt_text: str = ""
 
 
@@ -230,7 +230,7 @@ def analyse_page(
                 page.images.append(StructuredImage(
                     image_bytes=img.image_bytes,
                     ext=img.ext,
-                    epub_id=f"img_{image_id_counter[0]:04d}",
+                    image_id=f"img_{image_id_counter[0]:04d}",
                 ))
         else:
             logger.debug(f"Page {page_number}: skipping {len(page_info.images)} "
@@ -298,7 +298,7 @@ def analyse_page(
         page.images.append(StructuredImage(
             image_bytes=img.image_bytes,
             ext=img.ext,
-            epub_id=f"img_{image_id_counter[0]:04d}",
+            image_id=f"img_{image_id_counter[0]:04d}",
         ))
 
     return page

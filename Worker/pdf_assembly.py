@@ -11,7 +11,8 @@ Font selection:
 - Simplified Chinese  → STSong-Light / china-s
 - Japanese            → HeiseiMin-W3 / china-s (closest available)
 - Korean              → HYSMyeongJo-Medium / korea
-- _register_best_font() accepts a language arg.
+- _register_best_font() selects the ReportLab CID font; _get_fitz_font_name()
+  selects the PyMuPDF built-in CJK font; both accept a language arg.
 """
 
 from __future__ import annotations
