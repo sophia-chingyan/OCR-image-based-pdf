@@ -40,6 +40,12 @@
     .format-desc{font-size:.62rem;color:var(--muted);display:block;margin-left:19px;margin-top:1px}
     .format-label{font-family:'DM Mono',monospace;font-size:.65rem;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem}
 
+    /* ── Language picker ── */
+    .lang-picker{display:flex;gap:.5rem .75rem;flex-wrap:wrap;margin:.5rem 0 .25rem}
+    .lang-option{display:flex;align-items:center;gap:.35rem;font-family:'DM Mono',monospace;font-size:.72rem;color:var(--ink);cursor:pointer;user-select:none;white-space:nowrap}
+    .lang-option input[type="checkbox"]{accent-color:var(--red);width:13px;height:13px;cursor:pointer}
+    .lang-hint{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--muted);letter-spacing:.04em;margin-bottom:.6rem}
+
     #progress-panel{display:none;background:var(--cream);border:1px solid var(--border);padding:1.5rem;margin-bottom:2.5rem}
     .progress-file{font-weight:600;font-size:.95rem;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
     .progress-file-icon{color:var(--red)}
@@ -145,6 +151,19 @@
     <!-- Format picker shown after upload, hidden once job starts -->
     <div id="format-section" style="display:none">
       <div class="format-label">Output format: Clean PDF</div>
+      <div class="format-label" style="margin-top:.9rem">Language priority</div>
+      <div class="lang-picker" id="lang-picker">
+        <label class="lang-option"><input type="checkbox" value="auto" checked> Automatic Detection</label>
+        <label class="lang-option"><input type="checkbox" value="zh_tra_h"> Traditional Chinese (horizontal)</label>
+        <label class="lang-option"><input type="checkbox" value="zh_tra_v"> Traditional Chinese (vertical)</label>
+        <label class="lang-option"><input type="checkbox" value="zh_sim_h"> Simplified Chinese (horizontal)</label>
+        <label class="lang-option"><input type="checkbox" value="zh_sim_v"> Simplified Chinese (vertical)</label>
+        <label class="lang-option"><input type="checkbox" value="ja_h"> Japanese (horizontal, incl. hiragana, katakana &amp; kanji)</label>
+        <label class="lang-option"><input type="checkbox" value="ja_v"> Japanese (vertical, incl. hiragana, katakana &amp; kanji)</label>
+        <label class="lang-option"><input type="checkbox" value="ko_h"> Korean (horizontal)</label>
+        <label class="lang-option"><input type="checkbox" value="ko_v"> Korean (vertical)</label>
+      </div>
+      <div class="lang-hint">Select one or more languages to prioritize. Gemini will still detect all text — this only sets the preferred language(s).</div>
     </div>
     <div id="progress-actions"></div>
   </div>
@@ -177,6 +196,12 @@ const FORMAT_LABELS = {
 
 function getSelectedFormats(){
   return ['clean'];
+}
+
+function getSelectedLanguageHints(){
+  return [...document.querySelectorAll('#lang-picker input[type="checkbox"]:checked')]
+    .map(cb => cb.value)
+    .filter(v => v !== 'auto');
 }
 
 /* ── Drag & drop ── */
@@ -236,10 +261,11 @@ function renderPausedActions(id){
 async function startJob(id){
   try{
     const fmts=getSelectedFormats();
+    const hints=getSelectedLanguageHints();
     const res=await fetch(`/api/start/${id}`,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({output_formats:fmts})
+      body:JSON.stringify({output_formats:fmts,language_hints:hints})
     });
     if(!res.ok){const e=await res.json().catch(()=>({detail:'Start failed.'}));throw new Error(e.detail)}
     formatSection.style.display='none';

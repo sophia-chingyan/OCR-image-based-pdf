@@ -248,7 +248,16 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
 
 # ── Start / Pause / Stop / Delete ────────────────────────────────────────────
 @app.post("/api/start/{job_id}")
-async def start_job(job_id: str, user: str = Depends(require_auth)):
+async def start_job(job_id: str, request: Request, user: str = Depends(require_auth)):
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    language_hints = body.get("language_hints")
+    if not isinstance(language_hints, list):
+        language_hints = []
+
     r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
@@ -261,6 +270,7 @@ async def start_job(job_id: str, user: str = Depends(require_auth)):
 
     job["output_formats"] = ["clean"]
     job["clean_pdf_path"] = ""
+    job["language_hints"]  = language_hints
 
     job.update(status="queued", message="Queued", progress=0, error="",
                stop_requested=False, pause_requested=False)

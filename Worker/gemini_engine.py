@@ -139,8 +139,20 @@ class RateLimiter:
             self.calls.append(time.monotonic())
 
 
-# ── Prompt for OCR + layout (single call per page) ────────────────────────────
-OCR_PROMPT = """You are an OCR engine. Read this PDF page image and return ONLY a JSON object describing every text region you can see.
+# ── Language hint labels (keyed by the value sent from the UI) ────────────────
+LANGUAGE_HINT_LABELS: Dict[str, str] = {
+    "zh_tra_h": "Traditional Chinese (horizontal text)",
+    "zh_tra_v": "Traditional Chinese (vertical text)",
+    "zh_sim_h": "Simplified Chinese (horizontal text)",
+    "zh_sim_v": "Simplified Chinese (vertical text)",
+    "ja_h":     "Japanese (horizontal text, including hiragana, katakana, and kanji)",
+    "ja_v":     "Japanese (vertical text, including hiragana, katakana, and kanji)",
+    "ko_h":     "Korean (horizontal text)",
+    "ko_v":     "Korean (vertical text)",
+}
+
+# ── Base OCR prompt (language-hint line is appended dynamically) ──────────────
+_OCR_PROMPT_BASE = """You are an OCR engine. Read this PDF page image and return ONLY a JSON object describing every text region you can see.
 
 Return this exact JSON structure:
 {
@@ -206,6 +218,10 @@ class GeminiOCREngine(OCREngine):
         # Pre-primed result for the *next* call to _analyse_page. Used when
         # the worker has loaded a cached result from Redis for this page.
         self._primed_next_result: Optional[dict] = None
+
+        # Language priority hints set by the worker for the current job.
+        # Each entry is a key from LANGUAGE_HINT_LABELS (e.g. "zh_tra_v").
+        self._language_hints: List[str] = []
 
     def load(self) -> None:
         if not self.api_key:
@@ -284,6 +300,27 @@ class GeminiOCREngine(OCREngine):
 
     def health_check(self) -> bool:
         return self._loaded
+
+    def set_language_hints(self, hints: List[str]) -> None:
+        """
+        Set the language priority hints for the current job.
+        Called by the worker at the start of each job before page processing.
+        `hints` is a list of keys from LANGUAGE_HINT_LABELS (e.g. ["zh_tra_v"]).
+        The "auto" sentinel value is filtered out — it carries no prompt text.
+        """
+        self._language_hints = [h for h in (hints or []) if h in LANGUAGE_HINT_LABELS]
+
+    def _build_prompt(self) -> str:
+        """Return the OCR prompt, optionally extended with a language hint line."""
+        if not self._language_hints:
+            return _OCR_PROMPT_BASE
+        labels = ", ".join(LANGUAGE_HINT_LABELS[h] for h in self._language_hints)
+        hint_line = (
+            f"- Language priority: This document is expected to primarily contain {labels}."
+            " Prioritize recognition of these languages and scripts,"
+            " but still recognize all text accurately.\n"
+        )
+        return _OCR_PROMPT_BASE + hint_line
 
     def reset_page_cache(self):
         """
@@ -404,7 +441,7 @@ class GeminiOCREngine(OCREngine):
                     model=self.model_name,
                     contents=[
                         types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
-                        OCR_PROMPT,
+                        self._build_prompt(),
                     ],
                     config=types.GenerateContentConfig(
                         # Do NOT force application/json — some SDK versions
