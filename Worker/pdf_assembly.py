@@ -9,6 +9,15 @@ Two PDF output modes from OCR results:
 
 2. Clean PDF (方案 A) — assemble_clean_pdf()
    Re-renders OCR text into a cleanly typeset PDF using ReportLab.
+
+Changes from original:
+- All three PDF paths (textlayer, clean-ReportLab, clean-PyMuPDF) now
+  select the correct CJK font based on DocumentStructure.dominant_language.
+- Traditional Chinese → MSung-Light (ReportLab) / china-t (PyMuPDF)
+- Simplified Chinese  → STSong-Light / china-s
+- Japanese            → HeiseiMin-W3 / china-s (closest available)
+- Korean              → HYSMyeongJo-Medium / korea
+- _get_fitz_font_name() and _register_best_font() accept a language arg.
 """
 
 from __future__ import annotations
@@ -22,6 +31,64 @@ import fitz  # PyMuPDF
 from structure_analysis import DocumentStructure, StructuredPage
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Font selection helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_fitz_font_name(language: str) -> str:
+    """
+    Return the PyMuPDF built-in CJK font identifier for the given language.
+
+    PyMuPDF font names:
+      china-s  → Simplified Chinese  (Adobe-GB1)
+      china-t  → Traditional Chinese (Adobe-CNS1)
+      japan    → Japanese             (Adobe-Japan1)
+      korea    → Korean               (Adobe-Korea1)
+    """
+    lang_map = {
+        "ch_tra": "china-t",
+        "ch_sim": "china-s",
+        "japan":  "japan",
+        "korean": "korea",
+    }
+    result = lang_map.get(language, "china-t")
+    logger.info(f"PyMuPDF font for language '{language}': {result}")
+    return result
+
+
+def _register_best_font(pdfmetrics, UnicodeCIDFont, language: str = "ch_tra") -> str:
+    """
+    Try CJK CID fonts in order appropriate for `language`; return the
+    name of the first that registers successfully.
+
+    ReportLab CID font → CMap mapping:
+      STSong-Light      → UniGB-UCS2-H   (Adobe-GB1, Simplified Chinese)
+      MSung-Light       → UniCNS-UCS2-H  (Adobe-CNS1, Traditional Chinese)
+      HeiseiMin-W3      → UniJIS-UCS2-H  (Adobe-Japan1)
+      HYSMyeongJo-Medium → UniKS-UCS2-H  (Adobe-Korea1)
+    """
+    # Order candidates by language preference
+    if language == "ch_sim":
+        candidates = ["STSong-Light", "MSung-Light", "HeiseiMin-W3", "HYSMyeongJo-Medium"]
+    elif language == "japan":
+        candidates = ["HeiseiMin-W3", "MSung-Light", "STSong-Light", "HYSMyeongJo-Medium"]
+    elif language == "korean":
+        candidates = ["HYSMyeongJo-Medium", "MSung-Light", "STSong-Light", "HeiseiMin-W3"]
+    else:
+        # Default: Traditional Chinese (ch_tra or unknown)
+        candidates = ["MSung-Light", "STSong-Light", "HeiseiMin-W3", "HYSMyeongJo-Medium"]
+
+    for fname in candidates:
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont(fname))
+            logger.info(f"ReportLab CID font registered: {fname} (language={language})")
+            return fname
+        except Exception:
+            continue
+    logger.warning(f"No CJK CID font registered for language={language}, falling back to Helvetica")
+    return "Helvetica"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,6 +119,9 @@ def assemble_textlayer_pdf(
 
     # Pixel → point scale (must match the DPI used during rasterisation).
     px_to_pt = 72.0 / float(dpi)
+
+    # FIX: select the correct CJK font for the document's language
+    fitz_font_name = _get_fitz_font_name(structure.dominant_language)
 
     doc = fitz.open(str(original_pdf_path))
 
@@ -96,7 +166,7 @@ def assemble_textlayer_pdf(
 
             try:
                 tw = fitz.TextWriter(page_rect)
-                font = fitz.Font("china-s")
+                font = fitz.Font(fitz_font_name)
 
                 # Wrap to the bbox width; if the wrapped text would overflow
                 # vertically, shrink the font so all lines fit within the bbox.
@@ -145,7 +215,7 @@ def assemble_textlayer_pdf(
                 y_pos = max(page_rect.y0 + 10, min(y_pos, page_rect.y1 - 20))
                 try:
                     tw = fitz.TextWriter(page_rect)
-                    font = fitz.Font("china-s")
+                    font = fitz.Font(fitz_font_name)
                     fontsize = 8
                     max_width = page_rect.width - 40
                     lines = _wrap_text(text, font, fontsize, max_width)
@@ -244,7 +314,9 @@ def _assemble_clean_pdf_reportlab(
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
-    cjk_font = _register_best_font(pdfmetrics, UnicodeCIDFont)
+    # FIX: pass document language so the correct CMap is used
+    cjk_font = _register_best_font(pdfmetrics, UnicodeCIDFont,
+                                    language=structure.dominant_language)
     logger.info(f"Clean PDF using font: {cjk_font}")
 
     styles = getSampleStyleSheet()
@@ -365,7 +437,9 @@ def _assemble_clean_pdf_pymupdf(
     throws "Document is empty".
     """
     doc = fitz.open()
-    font = fitz.Font("china-s")
+    # FIX: select the correct CJK font for the document's language
+    fitz_font_name = _get_fitz_font_name(structure.dominant_language)
+    font = fitz.Font(fitz_font_name)
 
     title = structure.title or "Untitled"
     author = structure.author or ""
@@ -491,18 +565,6 @@ def _wrap_text_fitz(text: str, font, fontsize: float, max_width: float) -> List[
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _register_best_font(pdfmetrics, UnicodeCIDFont) -> str:
-    """Try CJK CID fonts in order; return the name of the first that works."""
-    candidates = ["STSong-Light", "MSung-Light", "HeiseiMin-W3", "HYSMyeongJo-Medium"]
-    for fname in candidates:
-        try:
-            pdfmetrics.registerFont(UnicodeCIDFont(fname))
-            return fname
-        except Exception:
-            continue
-    return "Helvetica"
-
-
 def _esc(text: str) -> str:
     return (text
             .replace("&", "&amp;")
@@ -515,8 +577,8 @@ def _esc(text: str) -> str:
 def _write_minimal_pdf(output_path: Path, title: str, message: str) -> None:
     """Write a bare-minimum valid PDF using only PyMuPDF."""
     doc = fitz.open()
-    page = doc.new_page()
-    page.insert_text((72, 100), title[:80],   fontsize=16)
-    page.insert_text((72, 140), message[:200], fontsize=10)
-    doc.save(str(output_path))
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 200), title[:100], fontsize=16)
+    page.insert_text((72, 240), message[:500], fontsize=10)
+    doc.save(str(output_path), garbage=4, deflate=True)
     doc.close()

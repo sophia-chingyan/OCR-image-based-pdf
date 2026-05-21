@@ -114,7 +114,10 @@ def _clear_ocr_cache(r, job_id: str) -> int:
 
 def run_pipeline(r, job: dict, engine) -> None:
     from pdf_ingestion import ingest_pdf, rasterize_page
-    from structure_analysis import analyse_page, build_toc, DocumentStructure
+    # FIX: import detect_dominant_language alongside the other helpers
+    from structure_analysis import (
+        analyse_page, build_toc, DocumentStructure, detect_dominant_language
+    )
     from epub_assembly import assemble_epub
     from pdf_assembly import assemble_textlayer_pdf, assemble_clean_pdf
 
@@ -134,11 +137,11 @@ def run_pipeline(r, job: dict, engine) -> None:
         if raw:
             cur = json.loads(raw)
             if cur.get("stop_requested") or cur.get("status") == "stopped":
-                update_job(r, job_id, status="stopped", message="Stopped by user.", 
+                update_job(r, job_id, status="stopped", message="Stopped by user.",
                           stop_requested=False, pause_requested=False)
                 return "stop"
             if cur.get("pause_requested"):
-                update_job(r, job_id, status="paused", message="Paused by user.", 
+                update_job(r, job_id, status="paused", message="Paused by user.",
                           pause_requested=False)
                 return "pause"
         return None
@@ -212,9 +215,15 @@ def run_pipeline(r, job: dict, engine) -> None:
         ingested.doc.close()
 
         toc = build_toc(structured_pages)
+        # FIX: detect document language so PDF assemblers pick the correct
+        # CJK font/CMap (e.g. MSung-Light/china-t for Traditional Chinese
+        # instead of STSong-Light/china-s which uses the wrong Adobe-GB1 CMap).
+        dominant_lang = detect_dominant_language(structured_pages)
+        logger.info(f"Job {job_id}: detected dominant language: {dominant_lang}")
         structure = DocumentStructure(
             title=ingested.meta.title, author=ingested.meta.author,
-            pages=structured_pages, toc=toc)
+            pages=structured_pages, toc=toc,
+            dominant_language=dominant_lang)
 
         # ── Assemble outputs (per-format error isolation) ────────────────────
         output_paths = {}

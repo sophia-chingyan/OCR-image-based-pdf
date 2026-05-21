@@ -3,6 +3,14 @@ Structure Analysis
 ==================
 Converts raw OCR TextBlocks + LayoutBlocks into a structured document model
 ready for EPUB / PDF assembly.
+
+Changes from original:
+- DocumentStructure gains `dominant_language` field (e.g. "ch_tra", "ch_sim",
+  "en") so downstream PDF assemblers can pick the correct CJK font/CMap.
+- Small decorative images (< MIN_IMAGE_PIXELS on either axis) are filtered
+  out during image-only page detection to prevent page explosion in clean PDF.
+- `detect_dominant_language()` helper aggregates per-page text to determine
+  the document's primary script.
 """
 
 from __future__ import annotations
@@ -15,6 +23,12 @@ from ocr_engine import TextBlock, LayoutBlock, BBox, TextDirection, LayoutType
 from pdf_ingestion import PageInfo
 
 logger = logging.getLogger(__name__)
+
+# ── Minimum image dimensions (pixels) to be considered meaningful content ────
+# Images smaller than this on EITHER axis are treated as decorative
+# (icons, separator dots, leaf ornaments, etc.) and excluded from
+# image-only pages.  They are still embedded on pages that have text.
+MIN_IMAGE_PIXELS = 150
 
 
 @dataclass
@@ -57,7 +71,123 @@ class DocumentStructure:
     author: str
     pages: List[StructuredPage]
     toc: List[tuple]           # [(level, title, page_num)]
+    # NEW: dominant language code across the whole document, used by PDF
+    # assemblers to select the correct CJK font.  Values mirror the codes
+    # from gemini_engine._detect_lang_from_text: "ch_tra", "ch_sim",
+    # "japan", "korean", "en".
+    dominant_language: str = "ch_tra"
 
+
+# ── Language detection (document-level) ──────────────────────────────────────
+
+# Traditional-Chinese-specific characters (a broader set than gemini_engine's)
+_TRAD_ONLY_CHARS = set(
+    "書學說這個們來對還過時從會點無問題經開與應該實際關體認識"
+    "種處學後當動過變還問題從來對說這個點無開與應該實際關體認識種處學後"
+    "電話號碼備練習觀歡閱讀點對問題認識過個"
+    "繁體傳統國語臺灣歲過來時個還從說對這會點無問題開與經應該實際關體認識種處學後當動變進將態讓願聲勢語氣離飛較點調節選擇圖書館層樓電話號碼備練習觀歡閱讀點對問題認識過個們書學說這實話應該實際還進場遊戲觸發節選擇園區場層區練觀歡閱"
+)
+_SIMP_ONLY_CHARS = set(
+    "书学说这个们来对还过时从会点无问题经开与应该实际关体认识"
+    "种处学后当动过变还问题从来对说这个点无开与应该实际关体认识种处学后"
+    "电话号码备练习观欢阅读点对问题认识过个"
+)
+
+CJK_RANGES = [
+    (0x4E00, 0x9FFF),
+    (0x3400, 0x4DBF),
+    (0x20000, 0x2A6DF),
+    (0x3000, 0x303F),
+]
+HIRAGANA_RANGE = (0x3040, 0x309F)
+KATAKANA_RANGE = (0x30A0, 0x30FF)
+HANGUL_RANGE   = (0xAC00, 0xD7AF)
+
+
+def _in_range(char: str, lo: int, hi: int) -> bool:
+    return lo <= ord(char) <= hi
+
+
+def detect_dominant_language(pages: List[StructuredPage]) -> str:
+    """
+    Aggregate all OCR text across pages and determine the dominant script.
+
+    Returns one of: "ch_tra", "ch_sim", "japan", "korean", "en".
+    """
+    all_text = ""
+    for p in pages:
+        for el in p.elements:
+            all_text += el.text
+
+    if not all_text:
+        return "ch_tra"   # safe default for CJK-heavy corpus
+
+    has_hangul   = any(_in_range(c, *HANGUL_RANGE) for c in all_text)
+    has_hiragana = any(_in_range(c, *HIRAGANA_RANGE) for c in all_text)
+    has_katakana = any(_in_range(c, *KATAKANA_RANGE) for c in all_text)
+    has_cjk      = any(
+        any(_in_range(c, lo, hi) for lo, hi in CJK_RANGES)
+        for c in all_text
+    )
+
+    if has_hangul:
+        return "korean"
+    if has_hiragana or has_katakana:
+        return "japan"
+    if has_cjk:
+        trad_count = sum(1 for c in all_text if c in _TRAD_ONLY_CHARS)
+        simp_count = sum(1 for c in all_text if c in _SIMP_ONLY_CHARS)
+        # Default to Traditional if counts are equal or ambiguous
+        return "ch_sim" if simp_count > trad_count * 2 else "ch_tra"
+    return "en"
+
+
+# ── Image size helpers ───────────────────────────────────────────────────────
+
+def _image_dimensions(img_bytes: bytes) -> tuple[int, int]:
+    """
+    Quickly read width/height from image bytes without decoding the full
+    image. Supports JPEG and PNG headers; returns (0, 0) on failure.
+    """
+    if not img_bytes or len(img_bytes) < 24:
+        return (0, 0)
+    # PNG: bytes 16-23 contain width (4B) and height (4B)
+    if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        import struct
+        w = struct.unpack('>I', img_bytes[16:20])[0]
+        h = struct.unpack('>I', img_bytes[20:24])[0]
+        return (w, h)
+    # JPEG: scan for SOFn markers
+    if img_bytes[:2] == b'\xff\xd8':
+        import struct
+        i = 2
+        while i < len(img_bytes) - 9:
+            if img_bytes[i] != 0xFF:
+                break
+            marker = img_bytes[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):
+                h = struct.unpack('>H', img_bytes[i+5:i+7])[0]
+                w = struct.unpack('>H', img_bytes[i+7:i+9])[0]
+                return (w, h)
+            length = struct.unpack('>H', img_bytes[i+2:i+4])[0]
+            i += 2 + length
+    return (0, 0)
+
+
+def _is_significant_image(img) -> bool:
+    """
+    Return True if the image is large enough to be meaningful content
+    (not a decorative icon / separator / tiny ornament).
+    """
+    w, h = _image_dimensions(img.image_bytes)
+    if w == 0 and h == 0:
+        # Cannot determine size — keep it to be safe, but also check
+        # byte size as a rough proxy.
+        return len(img.image_bytes) > 5000
+    return w >= MIN_IMAGE_PIXELS and h >= MIN_IMAGE_PIXELS
+
+
+# ── Page analysis ────────────────────────────────────────────────────────────
 
 def analyse_page(
     page_number: int,
@@ -89,14 +219,22 @@ def analyse_page(
 
     # ── Image-only page detection ────────────────────────────────────────────
     if not text_blocks and page_info.images:
-        page.is_image_only = True
-        for img in page_info.images:
-            image_id_counter[0] += 1
-            page.images.append(StructuredImage(
-                image_bytes=img.image_bytes,
-                ext=img.ext,
-                epub_id=f"img_{image_id_counter[0]:04d}",
-            ))
+        # FIX: filter out tiny decorative images to prevent page explosion
+        # in the clean PDF (each tiny icon was becoming a full A4 page).
+        significant_images = [img for img in page_info.images
+                              if _is_significant_image(img)]
+        if significant_images:
+            page.is_image_only = True
+            for img in significant_images:
+                image_id_counter[0] += 1
+                page.images.append(StructuredImage(
+                    image_bytes=img.image_bytes,
+                    ext=img.ext,
+                    epub_id=f"img_{image_id_counter[0]:04d}",
+                ))
+        else:
+            logger.debug(f"Page {page_number}: skipping {len(page_info.images)} "
+                         f"tiny decorative image(s)")
         return page
 
     # ── Compute font-size statistics for heading detection ───────────────────
@@ -152,6 +290,10 @@ def analyse_page(
 
     # ── Embed images that appear on this page ────────────────────────────────
     for img in page_info.images:
+        # FIX: on pages WITH text, still filter out tiny decorative images
+        # to reduce page bloat (they add a full-page image in clean PDF).
+        if not _is_significant_image(img):
+            continue
         image_id_counter[0] += 1
         page.images.append(StructuredImage(
             image_bytes=img.image_bytes,
@@ -189,27 +331,28 @@ def _infer_type(
         return "footnote"
 
     # List item: starts with bullet or number pattern
-    if re.match(r"^[•·▪▸\-\*]|^\d+[.)]\s|^[一二三四五六七八九十]+[、。]", text):
+    if re.match(r"^[•·▪▸\-\*]|^\d+[.)、]\s", text):
         return "list-item"
 
     return "paragraph"
 
 
-def _heading_level(font_size: float, median_size: float) -> int:
-    ratio = font_size / median_size if median_size > 0 else 1.0
-    if ratio >= 1.8:
+def _heading_level(font_size: float, median: float) -> int:
+    if font_size > median * 2.0:
         return 1
-    if ratio >= 1.4:
+    if font_size > median * 1.6:
         return 2
     return 3
 
 
 def build_toc(pages: List[StructuredPage]) -> List[tuple]:
-    """Extract table of contents from heading elements in first 10% of pages."""
+    """
+    Build a table of contents from heading elements across all pages.
+    Returns list of (level, title, page_number).
+    """
     toc = []
-    cutoff = max(1, int(len(pages) * 0.1))
-    for page in pages[:cutoff]:
-        for el in page.elements:
+    for p in pages:
+        for el in p.elements:
             if el.element_type == "heading":
-                toc.append((el.level, el.text, page.page_number))
+                toc.append((el.level, el.text.strip(), p.page_number))
     return toc
