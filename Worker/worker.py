@@ -126,6 +126,10 @@ def run_pipeline(r, job: dict, engine) -> None:
 
     output_formats = ["clean"]  # noqa: F841 – kept for job metadata consistency
 
+    # Apply language hints for this job (resets to [] if not set).
+    language_hints = job.get("language_hints") or []
+    engine.set_language_hints(language_hints)
+
     def check_stop_or_pause() -> str | None:
         """
         Check if user requested stop or pause.
