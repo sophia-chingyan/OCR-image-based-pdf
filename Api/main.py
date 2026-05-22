@@ -93,8 +93,10 @@ async def _clear_ocr_cache(r, job_id: str) -> int:
 async def create_session(request: Request, email: str) -> None:
     session_token = str(uuid.uuid4())
     r = await get_async_redis()
-    await r.set(f"session:{session_token}", email)
-    await r.aclose()
+    try:
+        await r.set(f"session:{session_token}", email)
+    finally:
+        await r.aclose()
     request.session["session_token"] = session_token
 
 async def get_current_user(request: Request) -> Optional[str]:
@@ -102,8 +104,10 @@ async def get_current_user(request: Request) -> Optional[str]:
     if not token:
         return None
     r = await get_async_redis()
-    email = await r.get(f"session:{token}")
-    await r.aclose()
+    try:
+        email = await r.get(f"session:{token}")
+    finally:
+        await r.aclose()
     return email
 
 async def require_auth(request: Request) -> str:
@@ -136,8 +140,10 @@ async def auth_logout(request: Request):
     token = request.session.pop("session_token", None)
     if token:
         r = await get_async_redis()
-        await r.delete(f"session:{token}")
-        await r.aclose()
+        try:
+            await r.delete(f"session:{token}")
+        finally:
+            await r.aclose()
     return RedirectResponse(url="/", status_code=302)
 
 @app.get("/", response_class=HTMLResponse)
@@ -197,10 +203,12 @@ async def upload_pdf(
     }
 
     r = await get_async_redis()
-    await r.set(f"job:{job_id}", json.dumps(job))
-    await r.lpush("job_history", job_id)
-    await r.ltrim("job_history", 0, JOB_HISTORY - 1)
-    await r.aclose()
+    try:
+        await r.set(f"job:{job_id}", json.dumps(job))
+        await r.lpush("job_history", job_id)
+        await r.ltrim("job_history", 0, JOB_HISTORY - 1)
+    finally:
+        await r.aclose()
 
     return JSONResponse({
         "job_id": job_id, "filename": file.filename,
@@ -211,8 +219,10 @@ async def upload_pdf(
 @app.get("/api/status/{job_id}")
 async def job_status(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    await r.aclose()
+    try:
+        raw = await r.get(f"job:{job_id}")
+    finally:
+        await r.aclose()
     if not raw:
         raise HTTPException(404, "Job not found.")
     return JSONResponse(json.loads(raw))
@@ -220,21 +230,25 @@ async def job_status(job_id: str, user: str = Depends(require_auth)):
 @app.get("/api/history")
 async def job_history(user: str = Depends(require_auth)):
     r = await get_async_redis()
-    ids = await r.lrange("job_history", 0, JOB_HISTORY - 1)
-    jobs = []
-    for jid in ids:
-        raw = await r.get(f"job:{jid}")
-        if raw:
-            jobs.append(json.loads(raw))
-    await r.aclose()
+    try:
+        ids = await r.lrange("job_history", 0, JOB_HISTORY - 1)
+        jobs = []
+        for jid in ids:
+            raw = await r.get(f"job:{jid}")
+            if raw:
+                jobs.append(json.loads(raw))
+    finally:
+        await r.aclose()
     return JSONResponse(jobs)
 
 # ── Download: Clean PDF ──────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}/clean")
 async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    await r.aclose()
+    try:
+        raw = await r.get(f"job:{job_id}")
+    finally:
+        await r.aclose()
     if not raw:
         raise HTTPException(404, "Job not found.")
     job = json.loads(raw)
@@ -259,24 +273,24 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         language_hints = []
 
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    if not raw:
-        await r.aclose()
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    if job["status"] not in ("pending", "stopped", "failed", "paused"):
-        await r.aclose()
-        raise HTTPException(400, f"Cannot start from status: {job['status']}.")
+    try:
+        raw = await r.get(f"job:{job_id}")
+        if not raw:
+            raise HTTPException(404, "Job not found.")
+        job = json.loads(raw)
+        if job["status"] not in ("pending", "stopped", "failed", "paused"):
+            raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
-    job["output_formats"] = ["clean"]
-    job["clean_pdf_path"] = ""
-    job["language_hints"]  = language_hints
+        job["output_formats"] = ["clean"]
+        job["clean_pdf_path"] = ""
+        job["language_hints"]  = language_hints
 
-    job.update(status="queued", message="Queued", progress=0, error="",
-               stop_requested=False, pause_requested=False)
-    await r.set(f"job:{job_id}", json.dumps(job))
-    await r.lpush("job_queue", job_id)
-    await r.aclose()
+        job.update(status="queued", message="Queued", progress=0, error="",
+                   stop_requested=False, pause_requested=False)
+        await r.set(f"job:{job_id}", json.dumps(job))
+        await r.lpush("job_queue", job_id)
+    finally:
+        await r.aclose()
     return JSONResponse({
         "job_id": job_id,
         "status": "queued",
@@ -286,76 +300,76 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 @app.post("/api/pause/{job_id}")
 async def pause_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    if not raw:
+    try:
+        raw = await r.get(f"job:{job_id}")
+        if not raw:
+            raise HTTPException(404, "Job not found.")
+        job = json.loads(raw)
+        s = job["status"]
+
+        if s in ("done", "failed", "stopped", "paused"):
+            raise HTTPException(400, f"Cannot pause from status: {s}.")
+
+        if s == "pending":
+            job.update(status="paused", message="Paused by user.")
+        elif s == "queued":
+            await r.lrem("job_queue", 0, job_id)
+            job.update(status="paused", message="Paused by user.")
+        elif s == "processing":
+            job.update(pause_requested=True, message="Pausing…")
+
+        await r.set(f"job:{job_id}", json.dumps(job))
+    finally:
         await r.aclose()
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    s = job["status"]
-
-    if s in ("done", "failed", "stopped", "paused"):
-        await r.aclose()
-        raise HTTPException(400, f"Cannot pause from status: {s}.")
-
-    if s == "pending":
-        job.update(status="paused", message="Paused by user.")
-    elif s == "queued":
-        await r.lrem("job_queue", 0, job_id)
-        job.update(status="paused", message="Paused by user.")
-    elif s == "processing":
-        job.update(pause_requested=True, message="Pausing…")
-
-    await r.set(f"job:{job_id}", json.dumps(job))
-    await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
 
 @app.post("/api/stop/{job_id}")
 async def stop_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    if not raw:
+    try:
+        raw = await r.get(f"job:{job_id}")
+        if not raw:
+            raise HTTPException(404, "Job not found.")
+        job = json.loads(raw)
+        s = job["status"]
+        if s in ("done", "failed", "stopped"):
+            raise HTTPException(400, f"Already terminal: {s}.")
+        if s == "pending":
+            job.update(status="stopped", message="Stopped by user.")
+        elif s == "queued":
+            await r.lrem("job_queue", 0, job_id)
+            job.update(status="stopped", message="Stopped by user.")
+        elif s in ("processing", "paused"):
+            job.update(stop_requested=True, message="Stopping…")
+        await r.set(f"job:{job_id}", json.dumps(job))
+    finally:
         await r.aclose()
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    s = job["status"]
-    if s in ("done", "failed", "stopped"):
-        await r.aclose()
-        raise HTTPException(400, f"Already terminal: {s}.")
-    if s == "pending":
-        job.update(status="stopped", message="Stopped by user.")
-    elif s == "queued":
-        await r.lrem("job_queue", 0, job_id)
-        job.update(status="stopped", message="Stopped by user.")
-    elif s in ("processing", "paused"):
-        job.update(stop_requested=True, message="Stopping…")
-    await r.set(f"job:{job_id}", json.dumps(job))
-    await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
 
 @app.delete("/api/delete/{job_id}")
 async def delete_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
-    raw = await r.get(f"job:{job_id}")
-    if not raw:
+    try:
+        raw = await r.get(f"job:{job_id}")
+        if not raw:
+            raise HTTPException(404, "Job not found.")
+        job = json.loads(raw)
+        if job["status"] == "processing":
+            raise HTTPException(400, "Stop it first.")
+        if job["status"] == "queued":
+            await r.lrem("job_queue", 0, job_id)
+        for key in ("pdf_path", "clean_pdf_path"):
+            try:
+                p = Path(job.get(key, ""))
+                if p.exists():
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        await _clear_ocr_cache(r, job_id)
+        await r.delete(f"job:{job_id}")
+        await r.lrem("job_history", 0, job_id)
+    finally:
         await r.aclose()
-        raise HTTPException(404, "Job not found.")
-    job = json.loads(raw)
-    if job["status"] == "processing":
-        await r.aclose()
-        raise HTTPException(400, "Stop it first.")
-    if job["status"] == "queued":
-        await r.lrem("job_queue", 0, job_id)
-    for key in ("pdf_path", "clean_pdf_path"):
-        try:
-            p = Path(job.get(key, ""))
-            if p.exists():
-                p.unlink(missing_ok=True)
-        except OSError:
-            pass
-    await _clear_ocr_cache(r, job_id)
-    await r.delete(f"job:{job_id}")
-    await r.lrem("job_history", 0, job_id)
-    await r.aclose()
     return JSONResponse({"job_id": job_id, "deleted": True})
 
 @app.get("/health")
