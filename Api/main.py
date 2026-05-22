@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import time
+import shutil
 import aiofiles
 import threading
 from contextlib import asynccontextmanager
@@ -25,10 +26,12 @@ with open(CONFIG_PATH) as f:
     CFG = yaml.safe_load(f)
 
 MAX_UPLOAD_BYTES = CFG["pipeline"]["max_pdf_size_mb"] * 1024 * 1024
-UPLOAD_DIR = Path("/app/uploads")
-OUTPUT_DIR = Path("/app/outputs")
+UPLOAD_DIR  = Path("/app/uploads")
+OUTPUT_DIR  = Path("/app/outputs")
+TMPWORK_DIR = Path("/app/tmp-work")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+TMPWORK_DIR.mkdir(parents=True, exist_ok=True)
 
 SECRET_KEY    = os.environ["SECRET_KEY"]
 ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"].strip().lower()
@@ -88,6 +91,22 @@ async def _clear_ocr_cache(r, job_id: str) -> int:
     except Exception:
         pass
     return deleted
+
+
+# ── tmp-work cleanup helper ──────────────────────────────────────────────────
+def _clear_tmp_work(job_id: str) -> None:
+    """
+    Remove the worker's per-job scratch directory. Normally the worker
+    cleans this up in its `finally` block, but if the worker was killed
+    mid-run (container restart) or the user is deleting a paused/stopped
+    job, the directory can persist. This is a best-effort cleanup.
+    """
+    try:
+        tmp_dir = TMPWORK_DIR / job_id
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 async def create_session(request: Request, email: str) -> None:
@@ -281,6 +300,18 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         if job["status"] not in ("pending", "stopped", "failed", "paused"):
             raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
+        # BUG FIX: if a previous attempt produced a clean_pdf, the file
+        # on disk would persist as an orphan after we clear the path
+        # below. Delete it so disk usage doesn't grow on repeated retries.
+        old_clean = job.get("clean_pdf_path", "")
+        if old_clean:
+            try:
+                p = Path(old_clean)
+                if p.exists():
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         job["output_formats"] = ["clean"]
         job["clean_pdf_path"] = ""
         job["language_hints"]  = language_hints
@@ -365,6 +396,10 @@ async def delete_job(job_id: str, user: str = Depends(require_auth)):
                     p.unlink(missing_ok=True)
             except OSError:
                 pass
+        # BUG FIX: also remove any per-job scratch directory left behind
+        # by a crashed/restarted worker so disk usage doesn't grow over
+        # time. Safe at this point because status != "processing".
+        _clear_tmp_work(job_id)
         await _clear_ocr_cache(r, job_id)
         await r.delete(f"job:{job_id}")
         await r.lrem("job_history", 0, job_id)
