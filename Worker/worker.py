@@ -42,14 +42,47 @@ CLEANUP      = CFG["pipeline"].get("tmp_cleanup_on_complete", True)
 
 
 # ── Job state helpers ────────────────────────────────────────────────────────
+# BUG FIX (race condition): the previous update_job did a non-atomic
+# read-modify-write that could clobber flag fields (`stop_requested`,
+# `pause_requested`) set by the API between the worker's read and write.
+# We now use a Redis WATCH/MULTI/EXEC transaction so the worker's update
+# is rejected if the API touched the key in the meantime; we retry until
+# the write succeeds. Both real redis-py and fakeredis support this.
 
 def update_job(r, job_id: str, **kw):
-    raw = r.get(f"job:{job_id}")
+    """
+    Atomic field-merge update of a job record. Retries up to 5 times if
+    a concurrent writer (e.g. the API setting stop/pause flags) touches
+    the same key during our read-modify-write window.
+    """
+    key = f"job:{job_id}"
+    for _attempt in range(5):
+        try:
+            with r.pipeline() as pipe:
+                pipe.watch(key)
+                raw = pipe.get(key)
+                if not raw:
+                    pipe.unwatch()
+                    return
+                job = json.loads(raw)
+                job.update(kw)
+                pipe.multi()
+                pipe.set(key, json.dumps(job))
+                pipe.execute()
+                return
+        except Exception:
+            # WatchError → another writer touched the key; loop and retry.
+            # Any other error → fall back to non-transactional write on
+            # the final attempt below.
+            time.sleep(0.01)
+    # Final fallback: best-effort non-atomic write (preserves prior behaviour
+    # if the transaction primitive is unavailable for some reason).
+    raw = r.get(key)
     if not raw:
         return
     job = json.loads(raw)
     job.update(kw)
-    r.set(f"job:{job_id}", json.dumps(job))
+    r.set(key, json.dumps(job))
 
 
 # ── OCR page cache helpers ──────────────────────────────────────────────────
@@ -124,11 +157,15 @@ def run_pipeline(r, job: dict, engine) -> None:
     tmp_dir  = TMPWORK_DIR / job_id
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    output_formats = ["clean"]  # noqa: F841 – kept for job metadata consistency
-
     # Apply language hints for this job (resets to [] if not set).
     language_hints = job.get("language_hints") or []
     engine.set_language_hints(language_hints)
+
+    # BUG FIX (defensive): clear the engine's in-memory per-page cache at
+    # the start of each job. If a previous job raised an exception after
+    # rasterization but before reset_page_cache(), stale id(image) entries
+    # could (very rarely) collide with new image ids on the next job.
+    engine.reset_page_cache()
 
     def check_stop_or_pause() -> str | None:
         """
@@ -179,17 +216,28 @@ def run_pipeline(r, job: dict, engine) -> None:
 
             # Try cache first — saves an API call and quota for resumes.
             cached = _load_ocr_page(r, job_id, page_num)
+
+            # BUG FIX (perf): only rasterize when we actually need the
+            # image. On resume, cached pages were previously rasterized
+            # at 400 DPI for no reason — a 50+ MB allocation per page
+            # that's discarded immediately. Skip rasterization entirely
+            # when a cache hit is replayed.
             if cached is not None:
                 update_job(r, job_id,
                            message=f"Page {page_num+1} / {total_pages} (cached)…",
                            progress=progress)
                 engine.prime_page_cache_from_dict(cached)
+                # The primed result is keyed by id() of whatever we pass
+                # to the engine methods. Use a small sentinel object so
+                # the three calls share one cache entry without
+                # rasterizing the real page.
+                page_img = _CachedPageSentinel(page_num)
             else:
                 update_job(r, job_id,
                            message=f"OCR page {page_num+1} / {total_pages}…",
                            progress=progress)
+                page_img = rasterize_page(ingested.doc, page_num, dpi=DPI)
 
-            page_img = rasterize_page(ingested.doc, page_num, dpi=DPI)
             direction     = engine.detect_direction(page_img)
             text_blocks   = engine.recognize(page_img, direction)
             layout_blocks = engine.get_layout(page_img)
@@ -261,6 +309,21 @@ def run_pipeline(r, job: dict, engine) -> None:
     finally:
         if CLEANUP and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+class _CachedPageSentinel:
+    """
+    Lightweight stand-in for a rasterized page used only when a page's
+    OCR result has been replayed from Redis. The engine's three interface
+    methods are called with this object, but because the engine has been
+    pre-primed, none of them inspect the image — they all return the
+    pre-loaded result. Using a real, distinct Python object guarantees
+    that `id(page_img)` does not collide with previously-cached entries.
+    """
+    __slots__ = ("page_num",)
+
+    def __init__(self, page_num: int):
+        self.page_num = page_num
 
 
 def cleanup_expired_files(r):
