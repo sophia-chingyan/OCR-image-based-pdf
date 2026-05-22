@@ -246,7 +246,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                 logger.info(f"Job {job_id}: cleared {removed} cached OCR pages")
             update_job(r, job_id, status="done", message="Complete",
                        progress=100, clean_pdf_path=clean_pdf_path)
-            logger.info(f"Job {job_id} done: clean_pdf_path")
+            # BUG FIX: was logging the literal string "clean_pdf_path"
+            # instead of the variable value
+            logger.info(f"Job {job_id} done: {clean_pdf_path}")
         else:
             update_job(r, job_id, status="failed",
                        message="Conversion failed.", error=assembly_error or "No output produced")

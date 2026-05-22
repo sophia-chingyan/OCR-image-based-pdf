@@ -17,6 +17,7 @@ Font selection:
 
 from __future__ import annotations
 import io
+import re
 import logging
 from pathlib import Path
 from typing import List
@@ -384,7 +385,19 @@ def _wrap_text_fitz(text: str, font, fontsize: float, max_width: float) -> List[
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# BUG FIX: XML control characters that are illegal in XML 1.0.
+# ReportLab's Paragraph parser chokes on these, causing the entire
+# ReportLab rendering path to fail. OCR output can contain stray
+# control characters from misrecognised glyphs or corrupted text.
+# XML 1.0 only allows: #x9, #xA, #xD, and #x20+.
+_CTRL_CHAR_RE = re.compile(
+    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'
+)
+
+
 def _esc(text: str) -> str:
+    # First strip illegal XML control characters
+    text = _CTRL_CHAR_RE.sub('', text)
     return (text
             .replace("&", "&amp;")
             .replace("<", "&lt;")

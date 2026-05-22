@@ -123,20 +123,28 @@ class RateLimiter:
 
     def wait(self):
         """Block until a request can be issued without exceeding the limit."""
-        with self.lock:
-            now = time.monotonic()
-            # Remove timestamps older than 60 seconds
-            while self.calls and now - self.calls[0] > 60.0:
-                self.calls.popleft()
-            if len(self.calls) >= self.max_rpm:
-                sleep_for = 60.0 - (now - self.calls[0]) + 0.1
-                if sleep_for > 0:
-                    logger.info(f"Rate limit reached — sleeping {sleep_for:.1f}s")
-                    time.sleep(sleep_for)
-                    now = time.monotonic()
-                    while self.calls and now - self.calls[0] > 60.0:
-                        self.calls.popleft()
-            self.calls.append(time.monotonic())
+        while True:
+            sleep_for = 0.0
+            with self.lock:
+                now = time.monotonic()
+                # Remove timestamps older than 60 seconds
+                while self.calls and now - self.calls[0] > 60.0:
+                    self.calls.popleft()
+                if len(self.calls) >= self.max_rpm:
+                    # BUG FIX: compute sleep duration inside the lock but
+                    # sleep OUTSIDE to avoid blocking other threads.
+                    sleep_for = 60.0 - (now - self.calls[0]) + 0.1
+                else:
+                    # Slot available — record the call and return.
+                    self.calls.append(time.monotonic())
+                    return
+
+            # Sleep outside the lock
+            if sleep_for > 0:
+                logger.info(f"Rate limit reached — sleeping {sleep_for:.1f}s")
+                time.sleep(sleep_for)
+            # Loop back to re-check — another thread may have grabbed
+            # the slot while we were sleeping.
 
 
 # ── Language hint labels (keyed by the value sent from the UI) ────────────────
