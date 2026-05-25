@@ -1,0 +1,21 @@
+ocr:
+  engine: gemini
+  model_name: "gemini-2.5-flash-lite"
+  rpm_limit: 15
+  rpd_limit: 1000
+  max_retries: 3
+  request_timeout_s: 120
+  confidence_threshold: 0.7
+  dpi: 400
+
+pipeline:
+  max_pdf_size_mb: 100
+  page_batch_size: 5
+  upload_retention_hours: 24
+  output_retention_days: 7
+  tmp_cleanup_on_complete: true
+
+server:
+  max_concurrent_jobs: 1
+  port: 8080
+  job_history_limit: 10
