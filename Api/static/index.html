@@ -178,6 +178,24 @@ function showToast(m,d=3000){toast.textContent=m;toast.classList.add('show');set
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
 
+/* ── BUG FIX: handle expired session uniformly across all API calls.
+   Previously, when the auth cookie was deleted or expired, every API
+   call returned 401 JSON but the page stayed put — the user saw a
+   stream of "Upload failed" / "Start failed" toasts with no path
+   forward. Now any 401 from the API redirects to '/', which the
+   backend renders as the login page when no valid session exists. */
+let _redirectingToLogin = false;
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (res.status === 401 && !_redirectingToLogin) {
+    _redirectingToLogin = true;
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    showToast('Session expired — redirecting to sign in…');
+    setTimeout(() => { window.location.href = '/'; }, 800);
+  }
+  return res;
+}
+
 /* ── Format helpers ── */
 const FORMAT_LABELS = {
   clean: 'Clean PDF',
@@ -209,7 +227,7 @@ async function handleFile(file){
   const fd=new FormData();
   fd.append('file',file);
   try{
-    const res=await fetch('/api/upload',{method:'POST',body:fd});
+    const res=await api('/api/upload',{method:'POST',body:fd});
     if(!res.ok){const e=await res.json().catch(()=>({detail:'Upload failed.'}));throw new Error(e.detail||'Upload failed.')}
     const data=await res.json();
     currentJobId=data.job_id;
@@ -251,7 +269,7 @@ async function startJob(id){
   try{
     const fmts=getSelectedFormats();
     const hints=getSelectedLanguageHints();
-    const res=await fetch(`/api/start/${id}`,{
+    const res=await api(`/api/start/${id}`,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({output_formats:fmts,language_hints:hints})
@@ -269,15 +287,15 @@ async function startJob(id){
 }
 
 async function pauseJob(id){
-  try{const res=await fetch(`/api/pause/${id}`,{method:'POST'});if(!res.ok)throw new Error('Pause failed.');showToast('Pause requested.')}catch(e){showToast(e.message)}
+  try{const res=await api(`/api/pause/${id}`,{method:'POST'});if(!res.ok)throw new Error('Pause failed.');showToast('Pause requested.')}catch(e){showToast(e.message)}
 }
 
 async function stopJob(id){
-  try{const res=await fetch(`/api/stop/${id}`,{method:'POST'});if(!res.ok)throw new Error('Stop failed.');showToast('Stop requested.')}catch(e){showToast(e.message)}
+  try{const res=await api(`/api/stop/${id}`,{method:'POST'});if(!res.ok)throw new Error('Stop failed.');showToast('Stop requested.')}catch(e){showToast(e.message)}
 }
 async function deleteJob(id,isCurrent=false){
   if(!confirm('Delete this job and its files?'))return;
-  try{const res=await fetch(`/api/delete/${id}`,{method:'DELETE'});if(!res.ok)throw new Error('Delete failed.');
+  try{const res=await api(`/api/delete/${id}`,{method:'DELETE'});if(!res.ok)throw new Error('Delete failed.');
     if(isCurrent){if(pollInterval){clearInterval(pollInterval);pollInterval=null}currentJobId=null;progressPanel.style.display='none'}
     showToast('Deleted.');loadHistory();
   }catch(e){showToast(e.message)}
@@ -285,7 +303,7 @@ async function deleteJob(id,isCurrent=false){
 
 function startPolling(id){if(pollInterval)clearInterval(pollInterval);pollInterval=setInterval(()=>pollStatus(id),5000);pollStatus(id)}
 async function pollStatus(id){
-  try{const res=await fetch(`/api/status/${id}`);if(!res.ok)return;const job=await res.json();
+  try{const res=await api(`/api/status/${id}`);if(!res.ok)return;const job=await res.json();
     updateProgressUI(job);
     if(['done','failed','stopped','paused'].includes(job.status)){clearInterval(pollInterval);pollInterval=null;loadHistory()}
   }catch(_){}
@@ -365,7 +383,7 @@ function renderHistoryCard(job) {
 
 async function loadHistory() {
   try {
-    const res = await fetch('/api/history');
+    const res = await api('/api/history');
     if (!res.ok) return;
     const jobs = await res.json();
     if (!jobs.length) {
@@ -379,7 +397,7 @@ async function loadHistory() {
 /* ── Resume polling for any active jobs on page load ── */
 async function resumeActiveJobs() {
   try {
-    const res = await fetch('/api/history');
+    const res = await api('/api/history');
     if (!res.ok) return;
     const jobs = await res.json();
     for (const job of jobs) {
@@ -400,7 +418,7 @@ async function resumeActiveJobs() {
 async function historyDeleteJob(id) {
   if (!confirm('Delete this job and its files?')) return;
   try {
-    await fetch(`/api/delete/${id}`, {method: 'DELETE'});
+    await api(`/api/delete/${id}`, {method: 'DELETE'});
     if (id === currentJobId) {
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
       currentJobId = null;
@@ -429,7 +447,7 @@ function startHistoryRefresh() {
   if (historyRefreshInterval) return;
   historyRefreshInterval = setInterval(async () => {
     try {
-      const res = await fetch('/api/history');
+      const res = await api('/api/history');
       if (!res.ok) return;
       const jobs = await res.json();
       const hasActive = jobs.some(j => ['queued', 'processing'].includes(j.status));
@@ -447,7 +465,7 @@ function startHistoryRefresh() {
 /* ── Init ── */
 loadHistory();
 resumeActiveJobs();
-fetch('/api/history').then(r=>r.json()).then(jobs=>{
+api('/api/history').then(r=>r.ok?r.json():[]).then(jobs=>{
   if(jobs.some(j=>['queued','processing'].includes(j.status))) startHistoryRefresh();
 }).catch(()=>{});
 </script>
