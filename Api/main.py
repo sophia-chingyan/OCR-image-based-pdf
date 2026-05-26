@@ -46,6 +46,12 @@ _HTTPS_ONLY = BASE_URL.startswith("https://")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
 
+# BUG FIX: Session keys previously had no TTL, so every sign-in leaked a
+# session:* key into Redis forever (especially when REDIS_URL points at an
+# external Redis). Bound sessions to 30 days; this is well past the cookie's
+# practical lifetime but stops the unbounded growth.
+SESSION_TTL_SECONDS = 30 * 24 * 3600
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -109,11 +115,51 @@ def _clear_tmp_work(job_id: str) -> None:
         pass
 
 
+# ── Job-record / file cleanup for jobs that fall off the history list ────────
+async def _purge_job_record(r, job_id: str) -> None:
+    """
+    Delete a job's redis record, output file, source PDF, OCR cache and
+    scratch directory. Best-effort; used when a job is pushed out of the
+    bounded history list so we don't leak resources indefinitely.
+
+    Caller is responsible for the actual ltrim — this just garbage-collects
+    a single id.
+    """
+    if not job_id:
+        return
+    raw = None
+    try:
+        raw = await r.get(f"job:{job_id}")
+    except Exception:
+        return
+    if raw:
+        try:
+            job = json.loads(raw)
+            for key in ("pdf_path", "clean_pdf_path"):
+                try:
+                    p = Path(job.get(key, ""))
+                    if p.exists():
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    _clear_tmp_work(job_id)
+    await _clear_ocr_cache(r, job_id)
+    try:
+        await r.delete(f"job:{job_id}")
+    except Exception:
+        pass
+
+
 async def create_session(request: Request, email: str) -> None:
     session_token = str(uuid.uuid4())
     r = await get_async_redis()
     try:
-        await r.set(f"session:{session_token}", email)
+        # BUG FIX: bound session TTL so old sessions don't accumulate
+        # forever in Redis. SET with an EX argument is supported by both
+        # redis-py and fakeredis.
+        await r.set(f"session:{session_token}", email, ex=SESSION_TTL_SECONDS)
     finally:
         await r.aclose()
     request.session["session_token"] = session_token
@@ -183,18 +229,73 @@ async def upload_pdf(
     file: UploadFile = File(...),
     user: str = Depends(require_auth),
 ):
-    if not file.filename.lower().endswith(".pdf"):
+    # BUG FIX: previously this code called `file.filename.lower()` directly,
+    # which raises AttributeError if the multipart part has no filename
+    # (which is legal per RFC 7578 and is what some HTTP clients send).
+    # Defensively coerce to a string.
+    fname = (file.filename or "").strip()
+    if not fname or not fname.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are accepted.")
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File exceeds {CFG['pipeline']['max_pdf_size_mb']}MB limit.")
 
-    formats = ["clean"]
+    # BUG FIX (DoS): the previous implementation called `await file.read()`
+    # which buffers the ENTIRE request body in memory before checking the
+    # size limit. A multi-GB upload (malicious or accidental) would OOM
+    # the container before the 413 was ever raised.
+    #
+    # Fix: enforce the limit in three layers:
+    #   1. Reject early if the client sent a Content-Length that exceeds
+    #      the limit — no body bytes read at all.
+    #   2. Stream the body to disk in 1 MiB chunks, accumulating size.
+    #   3. Abort and clean up the moment the running total crosses the
+    #      limit, well before any real OOM risk.
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413, f"File exceeds {CFG['pipeline']['max_pdf_size_mb']}MB limit."
+        )
 
     job_id   = str(uuid.uuid4())
     pdf_path = UPLOAD_DIR / f"{job_id}.pdf"
-    async with aiofiles.open(pdf_path, "wb") as f:
-        await f.write(content)
+    total    = 0
+    CHUNK    = 1024 * 1024  # 1 MiB
+
+    try:
+        async with aiofiles.open(pdf_path, "wb") as out:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        413,
+                        f"File exceeds {CFG['pipeline']['max_pdf_size_mb']}MB limit.",
+                    )
+                await out.write(chunk)
+    except HTTPException:
+        # Best-effort cleanup of the partially written file.
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    except Exception:
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    # Reject empty uploads explicitly so we don't enqueue a job for a 0-byte
+    # PDF (PyMuPDF would error later and confuse the user).
+    if total == 0:
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(400, "Uploaded file is empty.")
+
+    formats = ["clean"]
 
     page_count = 0
     try:
@@ -207,7 +308,7 @@ async def upload_pdf(
 
     job = {
         "job_id":          job_id,
-        "filename":        file.filename,
+        "filename":        fname,
         "status":          "pending",
         "progress":        0,
         "message":         "Waiting to start",
@@ -225,12 +326,23 @@ async def upload_pdf(
     try:
         await r.set(f"job:{job_id}", json.dumps(job))
         await r.lpush("job_history", job_id)
+        # BUG FIX: previously we just ltrim'd the history list, leaving the
+        # job:* records, output files, OCR cache and source PDFs of all
+        # jobs that fell off the end of the list as orphans in Redis / on
+        # disk. Read the IDs *beyond* the retention window first, then
+        # purge them properly.
+        try:
+            orphan_ids = await r.lrange("job_history", JOB_HISTORY, -1)
+        except Exception:
+            orphan_ids = []
         await r.ltrim("job_history", 0, JOB_HISTORY - 1)
+        for oid in (orphan_ids or []):
+            await _purge_job_record(r, oid)
     finally:
         await r.aclose()
 
     return JSONResponse({
-        "job_id": job_id, "filename": file.filename,
+        "job_id": job_id, "filename": fname,
         "page_count": page_count, "output_formats": formats,
     })
 
@@ -252,10 +364,27 @@ async def job_history(user: str = Depends(require_auth)):
     try:
         ids = await r.lrange("job_history", 0, JOB_HISTORY - 1)
         jobs = []
-        for jid in ids:
-            raw = await r.get(f"job:{jid}")
-            if raw:
-                jobs.append(json.loads(raw))
+        # BUG FIX: previously this issued one GET per id, which is N
+        # round-trips against external Redis. MGET batches it into one.
+        if ids:
+            try:
+                raws = await r.mget([f"job:{jid}" for jid in ids])
+            except Exception:
+                raws = None
+            if raws is None:
+                # Fall back to per-id gets if mget unavailable.
+                raws = []
+                for jid in ids:
+                    try:
+                        raws.append(await r.get(f"job:{jid}"))
+                    except Exception:
+                        raws.append(None)
+            for raw in raws:
+                if raw:
+                    try:
+                        jobs.append(json.loads(raw))
+                    except Exception:
+                        pass
     finally:
         await r.aclose()
     return JSONResponse(jobs)
@@ -275,7 +404,27 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
         raise HTTPException(400, "Job not complete.")
     p = Path(job.get("clean_pdf_path", ""))
     if not p.exists():
-        raise HTTPException(404, "Clean PDF not found.")
+        # BUG FIX: the output file may have been pruned by the worker's
+        # output-retention cleanup (default 7 days) even though the job
+        # record still says "done". Previously this returned 404 with the
+        # generic "Clean PDF not found" message, which is confusing — the
+        # UI's download link looked broken. Clear the stale path on the
+        # job record so the UI stops showing a download button, and
+        # return 410 Gone with a clear explanation.
+        try:
+            job["clean_pdf_path"] = ""
+            r2 = await get_async_redis()
+            try:
+                await r2.set(f"job:{job_id}", json.dumps(job))
+            finally:
+                await r2.aclose()
+        except Exception:
+            pass
+        raise HTTPException(
+            410,
+            "Clean PDF is no longer available (output retention window expired). "
+            "Please re-upload and reconvert."
+        )
     return FileResponse(str(p), media_type="application/pdf",
                         filename=f"{Path(job['filename']).stem}_clean.pdf")
 
@@ -287,6 +436,10 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         body = await request.json()
     except Exception:
         pass
+    # BUG FIX: tolerate body that isn't a dict (e.g. a bare string or null
+    # from a misbehaving client) — body.get() would raise AttributeError.
+    if not isinstance(body, dict):
+        body = {}
     language_hints = body.get("language_hints")
     if not isinstance(language_hints, list):
         language_hints = []
@@ -297,6 +450,12 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         if not raw:
             raise HTTPException(404, "Job not found.")
         job = json.loads(raw)
+        # BUG FIX: previously this code only ever returned the default 400
+        # "Cannot start from status: done" when a user clicked Restart on a
+        # job whose output file had been pruned. We still don't allow
+        # restart from "done" (the source PDF is also pruned at the same
+        # retention horizon), but the downstream pdf_path existence check
+        # below now returns a clearer 410 with re-upload guidance.
         if job["status"] not in ("pending", "stopped", "failed", "paused"):
             raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
