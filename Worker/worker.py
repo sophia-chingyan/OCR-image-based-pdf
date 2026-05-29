@@ -45,7 +45,7 @@ _worker_healthy: bool = False
 _worker_error: str = ""
 
 
-def get_worker_health() -> tuple:
+def get_worker_health() -> tuple[bool, str]:
     """Return (is_healthy, error_message) for the /health endpoint."""
     return _worker_healthy, _worker_error
 

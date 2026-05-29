@@ -155,7 +155,7 @@ class RateLimiter:
 class DailyRateLimiter:
     """
     Tracks daily API usage and raises a clear error when the RPD limit is hit.
-    Resets at midnight UTC (or after 24h from first call of the day).
+    Resets after 24 hours from the first call of the current window.
     """
     def __init__(self, max_rpd: int):
         self.max_rpd = max_rpd
