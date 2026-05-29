@@ -50,6 +50,23 @@ class BBox:
         union = self.area + other.area - intersection
         return (intersection / union) >= threshold if union > 0 else False
 
+    def contains(self, other: "BBox", threshold: float = 0.5) -> bool:
+        """
+        Returns True if at least `threshold` fraction of `other` is
+        covered by this bbox.  Useful for checking whether a small bbox
+        (e.g. a hyperlink) is contained within a larger bbox (e.g. a
+        text block).
+        """
+        ix0 = max(self.x0, other.x0)
+        iy0 = max(self.y0, other.y0)
+        ix1 = min(self.x1, other.x1)
+        iy1 = min(self.y1, other.y1)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return False
+        intersection = (ix1 - ix0) * (iy1 - iy0)
+        other_area = other.area
+        return (intersection / other_area) >= threshold if other_area > 0 else False
+
 
 @dataclass
 class TextBlock:

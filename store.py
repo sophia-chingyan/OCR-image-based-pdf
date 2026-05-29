@@ -17,11 +17,16 @@ if REDIS_URL:
     import redis as _redis
     import redis.asyncio as _aioredis
 
+    # FIX #12: Use module-level connection pools so we don't create a new
+    # connection per request. This enables proper connection reuse.
+    _sync_pool = _redis.ConnectionPool.from_url(REDIS_URL, decode_responses=True)
+    _async_pool = _aioredis.ConnectionPool.from_url(REDIS_URL, decode_responses=True)
+
     def get_sync_redis():
-        return _redis.from_url(REDIS_URL, decode_responses=True)
+        return _redis.Redis(connection_pool=_sync_pool)
 
     async def get_async_redis():
-        return _aioredis.from_url(REDIS_URL, decode_responses=True)
+        return _aioredis.Redis(connection_pool=_async_pool)
 
 else:
     import fakeredis

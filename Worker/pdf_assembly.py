@@ -182,13 +182,19 @@ def _assemble_clean_pdf_reportlab(
             safe = _esc(t)
             try:
                 if el.element_type == "heading":
+                    if el.href:
+                        safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
                     page_items.append(Paragraph(safe, hs.get(min(el.level, 3), s_h3)))
                 elif el.element_type == "paragraph":
                     if el.href:
                         safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
                     page_items.append(Paragraph(safe, s_body))
                 elif el.element_type == "list-item":
-                    page_items.append(Paragraph(f"\u2022 {safe}", s_li))
+                    if el.href:
+                        safe = f'<a href="{_esc(el.href)}" color="blue">\u2022 {safe}</a>'
+                    else:
+                        safe = f"\u2022 {safe}"
+                    page_items.append(Paragraph(safe, s_li))
                 elif el.element_type == "footnote":
                     page_items.append(Paragraph(safe, s_fn))
                 elif el.element_type == "page-number":

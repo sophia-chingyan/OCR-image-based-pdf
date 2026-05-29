@@ -11,8 +11,8 @@ Why Gemini:
 - Excellent vertical-text recognition
 - Single API call returns BOTH text AND layout classification
 
-Default model: gemini-2.5-flash (free tier: 10 RPM, 250 RPD)
-Configurable in config.yaml under ocr.model_name.
+Default model: gemini-2.5-flash-lite (configurable in config.yaml under ocr.model_name).
+Free-tier limits depend on the chosen model.
 
 Rate-limiting:
 The engine self-throttles to stay within the configured RPM. Free-tier users
@@ -155,7 +155,12 @@ class RateLimiter:
 class DailyRateLimiter:
     """
     Tracks daily API usage and raises a clear error when the RPD limit is hit.
-    Resets after 24 hours from the first call of the current window.
+
+    NOTE: This is an in-memory approximation. It resets 24 hours after the
+    first call of the current window (not at midnight Pacific), and resets
+    to 0 on container restart. This means actual daily usage can exceed
+    rpd_limit across restarts. For single-container deployments this is
+    acceptable as a best-effort guard.
     """
     def __init__(self, max_rpd: int):
         self.max_rpd = max_rpd
@@ -318,13 +323,14 @@ class GeminiOCREngine(OCREngine):
             x0, y0, x1, y1 = bbox_raw
             bbox = BBox(x0, y0, x1, y1)
             lang = _detect_lang_from_text(text)
-            # BUG FIX (#2): font_size_estimate was set to bbox.height — the
-            # pixel height of the entire block. Multi-line paragraphs have a
-            # very large bbox.height, dominating the median and making heading
-            # detection useless (everything collapsed to H3). Instead estimate
-            # the per-line height: divide bbox height by the number of lines.
+            # FIX #4: For vertical text, block height is the column length,
+            # not a line height. Use bbox.width / line_count instead since
+            # each "line" (column) has a width roughly equal to the font size.
             line_count = max(1, text.count('\n') + 1)
-            estimated_font_size = bbox.height / line_count
+            if direction == "vertical":
+                estimated_font_size = bbox.width / line_count
+            else:
+                estimated_font_size = bbox.height / line_count
             blocks.append(TextBlock(
                 text=text,
                 bbox=bbox,
@@ -345,6 +351,13 @@ class GeminiOCREngine(OCREngine):
         }
 
         for b in result.get("blocks", []):
+            # FIX #9: Skip empty-text blocks to match the filter in
+            # recognize(). This keeps text_blocks and layout_blocks
+            # aligned in length and index.
+            text = _coerce_str(b.get("text")).strip()
+            if not text:
+                continue
+
             # Safely coerce type to string before calling .lower()
             raw_type = b.get("type")
             type_str = _coerce_str(raw_type).lower().strip()
@@ -458,21 +471,42 @@ class GeminiOCREngine(OCREngine):
             return result
 
         # Convert BGR ndarray → JPEG bytes
-        jpeg_bytes = self._image_to_jpeg(page_image)
+        jpeg_bytes, scale = self._image_to_jpeg(page_image)
 
         result = self._call_gemini_with_retry(jpeg_bytes)
+
+        # FIX #1: Gemini returns bboxes in the downscaled image space.
+        # Upscale them back to full-resolution (400 DPI) pixel space so
+        # that structure_analysis can compare them against link bboxes
+        # (which are converted from PDF points to 400-DPI pixels).
+        if scale < 1.0:
+            inv_scale = 1.0 / scale
+            for b in result.get("blocks", []):
+                bbox = b.get("bbox")
+                if isinstance(bbox, list) and len(bbox) >= 4:
+                    b["bbox"] = [v * inv_scale for v in bbox[:4]]
+
         self._page_cache[cache_key] = result
         self._last_page_result = result
         return result
 
-    def _image_to_jpeg(self, page_image) -> bytes:
-        """Convert OpenCV BGR ndarray to JPEG bytes for the API."""
+    def _image_to_jpeg(self, page_image) -> tuple[bytes, float]:
+        """
+        Convert OpenCV BGR ndarray to JPEG bytes for the API.
+
+        Returns:
+            (jpeg_bytes, scale_factor) where scale_factor is the downscale
+            ratio applied (1.0 if no downscaling was needed). Gemini returns
+            bboxes in the downscaled image space; callers must divide by
+            scale_factor to recover full-resolution pixel coordinates.
+        """
         from PIL import Image
         import numpy as np
         # Downscale very large pages to keep token usage low.
         # Gemini handles up to about 3072×3072 well; we cap at 2048 max-side.
         h, w = page_image.shape[:2]
         max_side = 2048
+        scale = 1.0
         if max(h, w) > max_side:
             scale = max_side / max(h, w)
             new_w = int(w * scale)
@@ -484,7 +518,7 @@ class GeminiOCREngine(OCREngine):
         pil = Image.fromarray(rgb.astype(np.uint8))
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=85, optimize=True)
-        return buf.getvalue()
+        return buf.getvalue(), scale
 
     def _call_gemini_with_retry(self, jpeg_bytes: bytes) -> dict:
         from google.genai import types
@@ -513,6 +547,9 @@ class GeminiOCREngine(OCREngine):
                         # breaks our text-based parsing. Let the model return
                         # plain text and we'll parse it ourselves.
                         temperature=0.0,
+                        http_options=types.HttpOptions(
+                            timeout=self.timeout_s * 1000,  # milliseconds
+                        ),
                     ),
                 )
                 text = (response.text or "").strip()
