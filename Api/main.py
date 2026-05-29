@@ -3,6 +3,7 @@ import uuid
 import json
 import time
 import shutil
+import asyncio
 import aiofiles
 import threading
 from contextlib import asynccontextmanager
@@ -45,6 +46,10 @@ BASE_URL = BASE_URL.rstrip("/")
 _HTTPS_ONLY = BASE_URL.startswith("https://")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
+
+# Max retries for WATCH/MULTI/EXEC transactions on concurrent writes
+MAX_WATCH_RETRIES = 5
+WATCH_RETRY_DELAY = 0.01  # seconds
 
 # BUG FIX: Session keys previously had no TTL, so every sign-in leaked a
 # session:* key into Redis forever (especially when REDIS_URL points at an
@@ -458,7 +463,7 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
     r = await get_async_redis()
     try:
         # FIX #10: Retry on WatchError for atomic read-modify-write.
-        for _attempt in range(5):
+        for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
                     await pipe.watch(f"job:{job_id}")
@@ -500,8 +505,7 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
             except HTTPException:
                 raise
             except Exception:
-                import asyncio
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(WATCH_RETRY_DELAY)
         else:
             raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:
@@ -518,7 +522,7 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
     try:
         # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block
         # so it's transactional with the status update.
-        for _attempt in range(5):
+        for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
                     await pipe.watch(f"job:{job_id}")
@@ -549,8 +553,7 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
             except HTTPException:
                 raise
             except Exception:
-                import asyncio
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(WATCH_RETRY_DELAY)
         else:
             raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:
@@ -562,7 +565,7 @@ async def stop_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
         # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block.
-        for _attempt in range(5):
+        for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
                     await pipe.watch(f"job:{job_id}")
@@ -591,8 +594,7 @@ async def stop_job(job_id: str, user: str = Depends(require_auth)):
             except HTTPException:
                 raise
             except Exception:
-                import asyncio
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(WATCH_RETRY_DELAY)
         else:
             raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:

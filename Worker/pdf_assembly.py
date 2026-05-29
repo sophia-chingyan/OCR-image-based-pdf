@@ -190,11 +190,10 @@ def _assemble_clean_pdf_reportlab(
                         safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
                     page_items.append(Paragraph(safe, s_body))
                 elif el.element_type == "list-item":
+                    bullet_safe = f"\u2022 {safe}"
                     if el.href:
-                        safe = f'<a href="{_esc(el.href)}" color="blue">\u2022 {safe}</a>'
-                    else:
-                        safe = f"\u2022 {safe}"
-                    page_items.append(Paragraph(safe, s_li))
+                        bullet_safe = f'<a href="{_esc(el.href)}" color="blue">{bullet_safe}</a>'
+                    page_items.append(Paragraph(bullet_safe, s_li))
                 elif el.element_type == "footnote":
                     page_items.append(Paragraph(safe, s_fn))
                 elif el.element_type == "page-number":
