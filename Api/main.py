@@ -69,8 +69,11 @@ app.add_middleware(
 )
 
 _static_dir = Path(__file__).parent / "static"
-if _static_dir.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+# BUG FIX (#6): Do NOT mount /static publicly. index.html contains the full
+# authenticated UI. Serving it via StaticFiles bypasses the auth check in the
+# "/" route. The only HTML files are served through the authenticated "/" route.
+# if _static_dir.is_dir():
+#     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 oauth = OAuth()
 oauth.register(
@@ -446,51 +449,44 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 
     r = await get_async_redis()
     try:
-        raw = await r.get(f"job:{job_id}")
-        if not raw:
-            raise HTTPException(404, "Job not found.")
-        job = json.loads(raw)
-        # BUG FIX: previously this code only ever returned the default 400
-        # "Cannot start from status: done" when a user clicked Restart on a
-        # job whose output file had been pruned. We still don't allow
-        # restart from "done" (the source PDF is also pruned at the same
-        # retention horizon), but the downstream pdf_path existence check
-        # below now returns a clearer 410 with re-upload guidance.
-        if job["status"] not in ("pending", "stopped", "failed", "paused"):
-            raise HTTPException(400, f"Cannot start from status: {job['status']}.")
+        # BUG FIX (#7): use WATCH/MULTI/EXEC to prevent clobbering concurrent
+        # worker writes.
+        async with r.pipeline() as pipe:
+            await pipe.watch(f"job:{job_id}")
+            raw = await pipe.get(f"job:{job_id}")
+            if not raw:
+                raise HTTPException(404, "Job not found.")
+            job = json.loads(raw)
+            if job["status"] not in ("pending", "stopped", "failed", "paused"):
+                raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
-        # BUG FIX: validate that the uploaded source PDF still exists before
-        # queuing. The cleanup job may have pruned it after the retention
-        # window, in which case the worker would fail with a confusing
-        # FileNotFoundError. Fail fast with a clear error instead.
-        pdf_path = job.get("pdf_path", "")
-        if not pdf_path or not Path(pdf_path).exists():
-            raise HTTPException(
-                410,
-                "Source PDF has been removed from the server "
-                "(retention window expired). Please re-upload."
-            )
+            pdf_path = job.get("pdf_path", "")
+            if not pdf_path or not Path(pdf_path).exists():
+                raise HTTPException(
+                    410,
+                    "Source PDF has been removed from the server "
+                    "(retention window expired). Please re-upload."
+                )
 
-        # BUG FIX: if a previous attempt produced a clean_pdf, the file
-        # on disk would persist as an orphan after we clear the path
-        # below. Delete it so disk usage doesn't grow on repeated retries.
-        old_clean = job.get("clean_pdf_path", "")
-        if old_clean:
-            try:
-                p = Path(old_clean)
-                if p.exists():
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            old_clean = job.get("clean_pdf_path", "")
+            if old_clean:
+                try:
+                    p = Path(old_clean)
+                    if p.exists():
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-        job["output_formats"] = ["clean"]
-        job["clean_pdf_path"] = ""
-        job["language_hints"]  = language_hints
+            job["output_formats"] = ["clean"]
+            job["clean_pdf_path"] = ""
+            job["language_hints"]  = language_hints
+            job.update(status="queued", message="Queued", progress=0, error="",
+                       stop_requested=False, pause_requested=False)
 
-        job.update(status="queued", message="Queued", progress=0, error="",
-                   stop_requested=False, pause_requested=False)
-        await r.set(f"job:{job_id}", json.dumps(job))
-        await r.lpush("job_queue", job_id)
+            pipe.multi()
+            pipe.set(f"job:{job_id}", json.dumps(job))
+            pipe.lpush("job_queue", job_id)
+            await pipe.execute()
     finally:
         await r.aclose()
     return JSONResponse({
@@ -503,32 +499,30 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 async def pause_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        raw = await r.get(f"job:{job_id}")
-        if not raw:
-            raise HTTPException(404, "Job not found.")
-        job = json.loads(raw)
-        s = job["status"]
+        # BUG FIX (#7): use WATCH/MULTI/EXEC for atomic read-modify-write.
+        async with r.pipeline() as pipe:
+            await pipe.watch(f"job:{job_id}")
+            raw = await pipe.get(f"job:{job_id}")
+            if not raw:
+                raise HTTPException(404, "Job not found.")
+            job = json.loads(raw)
+            s = job["status"]
 
-        if s in ("done", "failed", "stopped", "paused"):
-            raise HTTPException(400, f"Cannot pause from status: {s}.")
+            if s in ("done", "failed", "stopped", "paused"):
+                raise HTTPException(400, f"Cannot pause from status: {s}.")
 
-        if s == "pending":
-            job.update(status="paused", message="Paused by user.")
-        elif s == "queued":
-            await r.lrem("job_queue", 0, job_id)
-            # BUG FIX (race): also set pause_requested=True. The worker may
-            # have already BRPOPped this job between the user's click and
-            # our LREM here; in that case the worker's own update_job
-            # would override our status="paused" with status="processing".
-            # Setting pause_requested ensures the worker's first
-            # check_stop_or_pause inside the loop will still catch the
-            # user's intent and pause cleanly.
-            job.update(status="paused", message="Paused by user.",
-                       pause_requested=True)
-        elif s == "processing":
-            job.update(pause_requested=True, message="Pausing…")
+            if s == "pending":
+                job.update(status="paused", message="Paused by user.")
+            elif s == "queued":
+                await r.lrem("job_queue", 0, job_id)
+                job.update(status="paused", message="Paused by user.",
+                           pause_requested=True)
+            elif s == "processing":
+                job.update(pause_requested=True, message="Pausing…")
 
-        await r.set(f"job:{job_id}", json.dumps(job))
+            pipe.multi()
+            pipe.set(f"job:{job_id}", json.dumps(job))
+            await pipe.execute()
     finally:
         await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
@@ -537,26 +531,28 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
 async def stop_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        raw = await r.get(f"job:{job_id}")
-        if not raw:
-            raise HTTPException(404, "Job not found.")
-        job = json.loads(raw)
-        s = job["status"]
-        if s in ("done", "failed", "stopped"):
-            raise HTTPException(400, f"Already terminal: {s}.")
-        if s == "pending":
-            job.update(status="stopped", message="Stopped by user.")
-        elif s == "queued":
-            await r.lrem("job_queue", 0, job_id)
-            # BUG FIX (race): see pause_job. Set stop_requested=True too
-            # so a worker that already BRPOPped this job will detect the
-            # stop on its first check_stop_or_pause inside the loop, even
-            # if its own status="processing" write overrode ours.
-            job.update(status="stopped", message="Stopped by user.",
-                       stop_requested=True)
-        elif s in ("processing", "paused"):
-            job.update(stop_requested=True, message="Stopping…")
-        await r.set(f"job:{job_id}", json.dumps(job))
+        # BUG FIX (#7): use WATCH/MULTI/EXEC for atomic read-modify-write.
+        async with r.pipeline() as pipe:
+            await pipe.watch(f"job:{job_id}")
+            raw = await pipe.get(f"job:{job_id}")
+            if not raw:
+                raise HTTPException(404, "Job not found.")
+            job = json.loads(raw)
+            s = job["status"]
+            if s in ("done", "failed", "stopped"):
+                raise HTTPException(400, f"Already terminal: {s}.")
+            if s == "pending":
+                job.update(status="stopped", message="Stopped by user.")
+            elif s == "queued":
+                await r.lrem("job_queue", 0, job_id)
+                job.update(status="stopped", message="Stopped by user.",
+                           stop_requested=True)
+            elif s in ("processing", "paused"):
+                job.update(stop_requested=True, message="Stopping…")
+
+            pipe.multi()
+            pipe.set(f"job:{job_id}", json.dumps(job))
+            await pipe.execute()
     finally:
         await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
@@ -601,4 +597,12 @@ async def health():
         redis_ok = False
     finally:
         await r.aclose()
-    return {"status": "ok", "redis": redis_ok}
+    # BUG FIX (#4): report worker health so a dead worker is detectable.
+    from Worker.worker import get_worker_health
+    worker_ok, worker_err = get_worker_health()
+    return {
+        "status": "ok" if (redis_ok and worker_ok) else "degraded",
+        "redis": redis_ok,
+        "worker": worker_ok,
+        "worker_error": worker_err if not worker_ok else "",
+    }

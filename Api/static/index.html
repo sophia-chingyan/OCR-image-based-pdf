@@ -362,6 +362,23 @@ function renderHistoryCard(job) {
     ? `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Download</a>`
     : '';
 
+  // BUG FIX (#5): Add status-dependent action buttons so users can
+  // start/resume/retry/pause/stop jobs from history cards, not just the
+  // progress panel.
+  let actionBtns = '';
+  if (job.status === 'pending') {
+    actionBtns = `<button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Start</button>`;
+  } else if (job.status === 'paused') {
+    actionBtns = `<button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Resume</button>`;
+  } else if (job.status === 'stopped') {
+    actionBtns = `<button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Restart</button>`;
+  } else if (job.status === 'failed') {
+    actionBtns = `<button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Retry</button>`;
+  } else if (job.status === 'queued' || job.status === 'processing') {
+    actionBtns = `<button class="action-btn btn-pause" data-action="pause" data-job-id="${id}">⏸ Pause</button>
+      <button class="action-btn btn-stop" data-action="stop" data-job-id="${id}">⏹ Stop</button>`;
+  }
+
   return `<div class="history-card" data-job-id="${id}">
     <div class="history-card-header">
       <div class="history-card-left">
@@ -374,6 +391,7 @@ function renderHistoryCard(job) {
       <div class="history-card-right">
         <div class="history-card-actions">
           ${dlLink}
+          ${actionBtns}
           <button class="action-btn btn-delete" data-action="history-delete" data-job-id="${id}" aria-label="Delete job and files">✕ Delete</button>
         </div>
       </div>
@@ -408,6 +426,15 @@ async function resumeActiveJobs() {
         formatSection.style.display = 'none';
         updateProgressUI(job);
         startPolling(job.job_id);
+        break;
+      }
+      // BUG FIX (#5): Also re-attach the progress panel for paused/stopped/
+      // failed/pending jobs so users can resume/retry/restart them.
+      if (['pending', 'paused', 'stopped', 'failed'].includes(job.status)) {
+        currentJobId = job.job_id;
+        progressPanel.style.display = 'block';
+        progressFn.textContent = job.filename || '';
+        updateProgressUI(job);
         break;
       }
     }
