@@ -135,8 +135,8 @@ class RateLimiter:
                     # sleep OUTSIDE to avoid blocking other threads.
                     sleep_for = 60.0 - (now - self.calls[0]) + 0.1
                 else:
-                    # Slot available — record the call and return.
-                    self.calls.append(time.monotonic())
+                    # Slot available — return without recording yet.
+                    # The caller must call record() after a successful request.
                     return
 
             # Sleep outside the lock
@@ -145,6 +145,50 @@ class RateLimiter:
                 time.sleep(sleep_for)
             # Loop back to re-check — another thread may have grabbed
             # the slot while we were sleeping.
+
+    def record(self):
+        """Record a successful request. Call AFTER the API call succeeds."""
+        with self.lock:
+            self.calls.append(time.monotonic())
+
+
+class DailyRateLimiter:
+    """
+    Tracks daily API usage and raises a clear error when the RPD limit is hit.
+    Resets after 24 hours from the first call of the current window.
+    """
+    def __init__(self, max_rpd: int):
+        self.max_rpd = max_rpd
+        self.lock = threading.Lock()
+        self._count = 0
+        self._day_start = 0.0  # monotonic timestamp of the start of current day window
+
+    def check(self):
+        """
+        Check if the daily limit has been reached. Raises RuntimeError with
+        a user-friendly message if so.
+        """
+        with self.lock:
+            now = time.monotonic()
+            # Reset counter after 24 hours
+            if self._day_start == 0.0 or (now - self._day_start) >= 86400.0:
+                self._day_start = now
+                self._count = 0
+            if self._count >= self.max_rpd:
+                raise RuntimeError(
+                    "Daily Gemini quota reached "
+                    f"({self.max_rpd} requests/day). "
+                    "Please wait until the quota resets or upgrade your API plan."
+                )
+
+    def record(self):
+        """Record a successful request against the daily limit."""
+        with self.lock:
+            now = time.monotonic()
+            if self._day_start == 0.0 or (now - self._day_start) >= 86400.0:
+                self._day_start = now
+                self._count = 0
+            self._count += 1
 
 
 # ── Language hint labels (keyed by the value sent from the UI) ────────────────
@@ -213,6 +257,7 @@ class GeminiOCREngine(OCREngine):
         self._client       = None
         self._loaded       = False
         self._rate_limiter = RateLimiter(self.rpm_limit)
+        self._daily_limiter = DailyRateLimiter(self.rpd_limit)
 
         # Cache of last result per page (so detect_direction → recognize →
         # get_layout can share one API call). Keyed by id() of the image
@@ -273,11 +318,18 @@ class GeminiOCREngine(OCREngine):
             x0, y0, x1, y1 = bbox_raw
             bbox = BBox(x0, y0, x1, y1)
             lang = _detect_lang_from_text(text)
+            # BUG FIX (#2): font_size_estimate was set to bbox.height — the
+            # pixel height of the entire block. Multi-line paragraphs have a
+            # very large bbox.height, dominating the median and making heading
+            # detection useless (everything collapsed to H3). Instead estimate
+            # the per-line height: divide bbox height by the number of lines.
+            line_count = max(1, text.count('\n') + 1)
+            estimated_font_size = bbox.height / line_count
             blocks.append(TextBlock(
                 text=text,
                 bbox=bbox,
                 language=lang,
-                font_size_estimate=bbox.height,
+                font_size_estimate=estimated_font_size,
                 confidence=1.0,
                 direction=direction,
             ))
@@ -438,6 +490,10 @@ class GeminiOCREngine(OCREngine):
         from google.genai import types
         from google.genai import errors as genai_errors
 
+        # BUG FIX (#3): check daily quota BEFORE attempting the call.
+        # Raises RuntimeError with a user-friendly message if limit reached.
+        self._daily_limiter.check()
+
         attempt = 0
         last_exc: Exception = RuntimeError("no attempts made")
 
@@ -460,7 +516,12 @@ class GeminiOCREngine(OCREngine):
                     ),
                 )
                 text = (response.text or "").strip()
-                return self._parse_response(text)
+                result = self._parse_response(text)
+                # BUG FIX (#8): record the call AFTER success, not before.
+                # Previously, failed/retried calls burned multiple RPM slots.
+                self._rate_limiter.record()
+                self._daily_limiter.record()
+                return result
 
             except genai_errors.APIError as e:
                 last_exc = e

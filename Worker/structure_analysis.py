@@ -187,6 +187,27 @@ def _is_significant_image(img) -> bool:
     return w >= MIN_IMAGE_PIXELS and h >= MIN_IMAGE_PIXELS
 
 
+# Threshold: if an image covers more than this fraction of the page area,
+# it's considered "page-spanning" (i.e. the scanned page image itself).
+_PAGE_SPAN_THRESHOLD = 0.6
+
+
+def _is_page_spanning_image(img, page_info: "PageInfo") -> bool:
+    """
+    Return True if the image covers most of the page area. Used to detect
+    the full-page scan image on scanned/image PDFs so it isn't re-embedded
+    alongside the OCR text.
+    """
+    # img.bbox is in PDF point coordinates (same as page_info.width/height)
+    img_width = abs(img.bbox.x1 - img.bbox.x0)
+    img_height = abs(img.bbox.y1 - img.bbox.y0)
+    page_area = page_info.width * page_info.height
+    if page_area <= 0:
+        return False
+    img_area = img_width * img_height
+    return (img_area / page_area) >= _PAGE_SPAN_THRESHOLD
+
+
 # ── Page analysis ────────────────────────────────────────────────────────────
 
 def analyse_page(
@@ -289,10 +310,18 @@ def analyse_page(
         ))
 
     # ── Embed images that appear on this page ────────────────────────────────
+    # BUG FIX (#1): For scanned/image PDFs, each page is one large embedded
+    # image. After Gemini OCRs it, text_blocks is non-empty so we reach this
+    # code path. The full-page scan passes _is_significant_image (way over
+    # 150px) and gets embedded alongside the OCR text — duplicating content
+    # and bloating the file. Skip images that span most of the page when
+    # OCR has already produced text for this page.
     for img in page_info.images:
-        # FIX: on pages WITH text, still filter out tiny decorative images
-        # to reduce page bloat (they add a full-page image in clean PDF).
         if not _is_significant_image(img):
+            continue
+        # Skip page-spanning images on pages where OCR produced text.
+        # These are almost certainly the scanned page image itself.
+        if text_blocks and _is_page_spanning_image(img, page_info):
             continue
         image_id_counter[0] += 1
         page.images.append(StructuredImage(

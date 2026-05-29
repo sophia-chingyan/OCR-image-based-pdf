@@ -40,6 +40,15 @@ DPI          = CFG["ocr"]["dpi"]
 BATCH_SIZE   = CFG["pipeline"]["page_batch_size"]
 CLEANUP      = CFG["pipeline"].get("tmp_cleanup_on_complete", True)
 
+# Worker health status — read by the API's /health endpoint.
+_worker_healthy: bool = False
+_worker_error: str = ""
+
+
+def get_worker_health() -> tuple[bool, str]:
+    """Return (is_healthy, error_message) for the /health endpoint."""
+    return _worker_healthy, _worker_error
+
 
 # ── Job state helpers ────────────────────────────────────────────────────────
 # BUG FIX (race condition): the previous update_job did a non-atomic
@@ -436,7 +445,22 @@ def main():
     logger.info("Worker starting…")
     from engine_factory import get_engine
     engine = get_engine(CFG["ocr"])
-    engine.load()
+
+    # BUG FIX (#4): engine.load() raises RuntimeError when GEMINI_API_KEY is
+    # missing/invalid. Previously this killed the daemon thread silently,
+    # leaving the API running with no worker. Wrap init and surface the error
+    # via a global flag that the /health endpoint can report.
+    global _worker_healthy, _worker_error
+    try:
+        engine.load()
+    except Exception as exc:
+        _worker_healthy = False
+        _worker_error = str(exc)
+        logger.error(f"Worker failed to start: {exc}")
+        return
+
+    _worker_healthy = True
+    _worker_error = ""
     logger.info("OCR engine ready.")
     r = get_sync_redis()
     last_cleanup = time.time()
