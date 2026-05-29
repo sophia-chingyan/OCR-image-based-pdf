@@ -3,6 +3,7 @@ import uuid
 import json
 import time
 import shutil
+import asyncio
 import aiofiles
 import threading
 from contextlib import asynccontextmanager
@@ -45,6 +46,10 @@ BASE_URL = BASE_URL.rstrip("/")
 _HTTPS_ONLY = BASE_URL.startswith("https://")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
+
+# Max retries for WATCH/MULTI/EXEC transactions on concurrent writes
+MAX_WATCH_RETRIES = 5
+WATCH_RETRY_DELAY = 0.01  # seconds
 
 # BUG FIX: Session keys previously had no TTL, so every sign-in leaked a
 # session:* key into Redis forever (especially when REDIS_URL points at an
@@ -125,6 +130,10 @@ async def _purge_job_record(r, job_id: str) -> None:
     scratch directory. Best-effort; used when a job is pushed out of the
     bounded history list so we don't leak resources indefinitely.
 
+    FIX #6: Only purge jobs in terminal states (done, failed, stopped).
+    If the job is still queued/processing/paused, leave it alone — the
+    worker or user may still need it.
+
     Caller is responsible for the actual ltrim — this just garbage-collects
     a single id.
     """
@@ -138,6 +147,10 @@ async def _purge_job_record(r, job_id: str) -> None:
     if raw:
         try:
             job = json.loads(raw)
+            # Don't purge jobs that are still active
+            status = job.get("status", "")
+            if status in ("queued", "processing", "paused", "pending"):
+                return
             for key in ("pdf_path", "clean_pdf_path"):
                 try:
                     p = Path(job.get(key, ""))
@@ -449,44 +462,52 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 
     r = await get_async_redis()
     try:
-        # BUG FIX (#7): use WATCH/MULTI/EXEC to prevent clobbering concurrent
-        # worker writes.
-        async with r.pipeline() as pipe:
-            await pipe.watch(f"job:{job_id}")
-            raw = await pipe.get(f"job:{job_id}")
-            if not raw:
-                raise HTTPException(404, "Job not found.")
-            job = json.loads(raw)
-            if job["status"] not in ("pending", "stopped", "failed", "paused"):
-                raise HTTPException(400, f"Cannot start from status: {job['status']}.")
+        # FIX #10: Retry on WatchError for atomic read-modify-write.
+        for _attempt in range(MAX_WATCH_RETRIES):
+            try:
+                async with r.pipeline() as pipe:
+                    await pipe.watch(f"job:{job_id}")
+                    raw = await pipe.get(f"job:{job_id}")
+                    if not raw:
+                        raise HTTPException(404, "Job not found.")
+                    job = json.loads(raw)
+                    if job["status"] not in ("pending", "stopped", "failed", "paused"):
+                        raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
-            pdf_path = job.get("pdf_path", "")
-            if not pdf_path or not Path(pdf_path).exists():
-                raise HTTPException(
-                    410,
-                    "Source PDF has been removed from the server "
-                    "(retention window expired). Please re-upload."
-                )
+                    pdf_path = job.get("pdf_path", "")
+                    if not pdf_path or not Path(pdf_path).exists():
+                        raise HTTPException(
+                            410,
+                            "Source PDF has been removed from the server "
+                            "(retention window expired). Please re-upload."
+                        )
 
-            old_clean = job.get("clean_pdf_path", "")
-            if old_clean:
-                try:
-                    p = Path(old_clean)
-                    if p.exists():
-                        p.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    old_clean = job.get("clean_pdf_path", "")
+                    if old_clean:
+                        try:
+                            p = Path(old_clean)
+                            if p.exists():
+                                p.unlink(missing_ok=True)
+                        except OSError:
+                            pass
 
-            job["output_formats"] = ["clean"]
-            job["clean_pdf_path"] = ""
-            job["language_hints"]  = language_hints
-            job.update(status="queued", message="Queued", progress=0, error="",
-                       stop_requested=False, pause_requested=False)
+                    job["output_formats"] = ["clean"]
+                    job["clean_pdf_path"] = ""
+                    job["language_hints"]  = language_hints
+                    job.update(status="queued", message="Queued", progress=0, error="",
+                               stop_requested=False, pause_requested=False)
 
-            pipe.multi()
-            pipe.set(f"job:{job_id}", json.dumps(job))
-            pipe.lpush("job_queue", job_id)
-            await pipe.execute()
+                    pipe.multi()
+                    pipe.set(f"job:{job_id}", json.dumps(job))
+                    pipe.lpush("job_queue", job_id)
+                    await pipe.execute()
+                break  # success
+            except HTTPException:
+                raise
+            except Exception:
+                await asyncio.sleep(WATCH_RETRY_DELAY)
+        else:
+            raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:
         await r.aclose()
     return JSONResponse({
@@ -499,30 +520,42 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 async def pause_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        # BUG FIX (#7): use WATCH/MULTI/EXEC for atomic read-modify-write.
-        async with r.pipeline() as pipe:
-            await pipe.watch(f"job:{job_id}")
-            raw = await pipe.get(f"job:{job_id}")
-            if not raw:
-                raise HTTPException(404, "Job not found.")
-            job = json.loads(raw)
-            s = job["status"]
+        # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block
+        # so it's transactional with the status update.
+        for _attempt in range(MAX_WATCH_RETRIES):
+            try:
+                async with r.pipeline() as pipe:
+                    await pipe.watch(f"job:{job_id}")
+                    raw = await pipe.get(f"job:{job_id}")
+                    if not raw:
+                        raise HTTPException(404, "Job not found.")
+                    job = json.loads(raw)
+                    s = job["status"]
 
-            if s in ("done", "failed", "stopped", "paused"):
-                raise HTTPException(400, f"Cannot pause from status: {s}.")
+                    if s in ("done", "failed", "stopped", "paused"):
+                        raise HTTPException(400, f"Cannot pause from status: {s}.")
 
-            if s == "pending":
-                job.update(status="paused", message="Paused by user.")
-            elif s == "queued":
-                await r.lrem("job_queue", 0, job_id)
-                job.update(status="paused", message="Paused by user.",
-                           pause_requested=True)
-            elif s == "processing":
-                job.update(pause_requested=True, message="Pausing…")
+                    if s == "pending":
+                        job.update(status="paused", message="Paused by user.")
+                    elif s == "queued":
+                        job.update(status="paused", message="Paused by user.",
+                                   pause_requested=True)
+                    elif s == "processing":
+                        job.update(pause_requested=True, message="Pausing…")
 
-            pipe.multi()
-            pipe.set(f"job:{job_id}", json.dumps(job))
-            await pipe.execute()
+                    pipe.multi()
+                    pipe.set(f"job:{job_id}", json.dumps(job))
+                    # lrem inside MULTI so it's atomic with the status change
+                    if s == "queued":
+                        pipe.lrem("job_queue", 0, job_id)
+                    await pipe.execute()
+                break  # success
+            except HTTPException:
+                raise
+            except Exception:
+                await asyncio.sleep(WATCH_RETRY_DELAY)
+        else:
+            raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:
         await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
@@ -531,28 +564,39 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
 async def stop_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        # BUG FIX (#7): use WATCH/MULTI/EXEC for atomic read-modify-write.
-        async with r.pipeline() as pipe:
-            await pipe.watch(f"job:{job_id}")
-            raw = await pipe.get(f"job:{job_id}")
-            if not raw:
-                raise HTTPException(404, "Job not found.")
-            job = json.loads(raw)
-            s = job["status"]
-            if s in ("done", "failed", "stopped"):
-                raise HTTPException(400, f"Already terminal: {s}.")
-            if s == "pending":
-                job.update(status="stopped", message="Stopped by user.")
-            elif s == "queued":
-                await r.lrem("job_queue", 0, job_id)
-                job.update(status="stopped", message="Stopped by user.",
-                           stop_requested=True)
-            elif s in ("processing", "paused"):
-                job.update(stop_requested=True, message="Stopping…")
+        # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block.
+        for _attempt in range(MAX_WATCH_RETRIES):
+            try:
+                async with r.pipeline() as pipe:
+                    await pipe.watch(f"job:{job_id}")
+                    raw = await pipe.get(f"job:{job_id}")
+                    if not raw:
+                        raise HTTPException(404, "Job not found.")
+                    job = json.loads(raw)
+                    s = job["status"]
+                    if s in ("done", "failed", "stopped"):
+                        raise HTTPException(400, f"Already terminal: {s}.")
+                    if s == "pending":
+                        job.update(status="stopped", message="Stopped by user.")
+                    elif s == "queued":
+                        job.update(status="stopped", message="Stopped by user.",
+                                   stop_requested=True)
+                    elif s in ("processing", "paused"):
+                        job.update(stop_requested=True, message="Stopping…")
 
-            pipe.multi()
-            pipe.set(f"job:{job_id}", json.dumps(job))
-            await pipe.execute()
+                    pipe.multi()
+                    pipe.set(f"job:{job_id}", json.dumps(job))
+                    # lrem inside MULTI so it's atomic with the status change
+                    if s == "queued":
+                        pipe.lrem("job_queue", 0, job_id)
+                    await pipe.execute()
+                break  # success
+            except HTTPException:
+                raise
+            except Exception:
+                await asyncio.sleep(WATCH_RETRY_DELAY)
+        else:
+            raise HTTPException(500, "Concurrent update conflict, please retry.")
     finally:
         await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
@@ -606,3 +650,13 @@ async def health():
         "worker": worker_ok,
         "worker_error": worker_err if not worker_ok else "",
     }
+
+@app.get("/api/config")
+async def get_config():
+    """
+    Return client-relevant configuration so the frontend doesn't
+    hardcode limits that may drift from the server config.
+    """
+    return JSONResponse({
+        "max_pdf_size_mb": CFG["pipeline"]["max_pdf_size_mb"],
+    })

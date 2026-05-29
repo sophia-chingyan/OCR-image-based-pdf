@@ -272,10 +272,10 @@ def analyse_page(
                 layout_map[i] = lb.block_type
 
     # ── Match hyperlinks to text blocks ──────────────────────────────────────
-    # FIX: hyperlink bboxes come from PyMuPDF in PDF point space, but text-
-    # block bboxes are in pixel space. Convert the link bbox to pixel space
-    # so the overlap test is meaningful (previously it never matched at
-    # 400 DPI because the link rect was ~5.5× smaller than the text rect).
+    # FIX #2: Use "fraction of the link covered by the block" instead of IoU.
+    # A hyperlink typically covers one word inside a large paragraph, so IoU
+    # is tiny. Instead we check if at least 50% of the link area falls within
+    # the text block.
     link_map: dict[int, str] = {}
     for link in page_info.links:
         link_bbox_px = BBox(
@@ -285,7 +285,7 @@ def analyse_page(
             link.bbox.y1 * dpi_scale,
         )
         for i, tb in enumerate(text_blocks):
-            if link_bbox_px.overlaps(tb.bbox, threshold=0.2):
+            if tb.bbox.contains(link_bbox_px, threshold=0.5):
                 link_map[i] = link.url
 
     # ── Build elements ───────────────────────────────────────────────────────

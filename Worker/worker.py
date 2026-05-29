@@ -404,7 +404,9 @@ def cleanup_expired_files(r):
                 status = job.get("status")
                 # Anything that isn't a terminal "user is finished with this"
                 # state should keep its source PDF on disk.
-                if status not in ("done", "stopped"):
+                # FIX #7: Also protect "stopped" jobs since the UI offers
+                # a "Restart" button for them.
+                if status not in ("done",):
                     protected_job_ids.add(job.get("job_id", ""))
             except Exception:
                 continue

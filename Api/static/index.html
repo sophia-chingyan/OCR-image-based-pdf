@@ -211,6 +211,15 @@ function getSelectedLanguageHints(){
     .filter(v => v !== 'auto');
 }
 
+/* ── Config (fetched from server to avoid hardcoded limits) ── */
+let MAX_PDF_SIZE_MB = 100; // fallback default
+(async function loadConfig(){
+  try{
+    const res=await fetch('/api/config');
+    if(res.ok){const cfg=await res.json();MAX_PDF_SIZE_MB=cfg.max_pdf_size_mb||100;}
+  }catch(e){}
+})();
+
 /* ── Drag & drop ── */
 dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('drag-over')});
 dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('drag-over'));
@@ -219,7 +228,7 @@ fileInput.addEventListener('change',()=>{if(fileInput.files[0])handleFile(fileIn
 
 async function handleFile(file){
   if(!file.name.toLowerCase().endsWith('.pdf'))return showToast('Please select a PDF file.');
-  if(file.size>100*1024*1024)return showToast('File exceeds 100 MB limit.');
+  if(file.size>MAX_PDF_SIZE_MB*1024*1024)return showToast(`File exceeds ${MAX_PDF_SIZE_MB} MB limit.`);
   progressPanel.style.display='block';progressFn.textContent=file.name;
   progressMsg.textContent='Uploading…';progressPct.textContent='';progressActs.innerHTML='';
   progressBar.style.width='0%';progressBar.classList.add('indeterminate');
