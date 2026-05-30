@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access Denied — OCR for Imaged PDF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#f7f5f2;--surface:#fff;--border:#e2ddd7;--text:#1c1917;--text-muted:#78716c;
+      --accent:#c2410c;--accent-hover:#9a3412;--red:#dc2626;--red-soft:#fef2f2;
+      --shadow-md:0 4px 12px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.04);
+    }
+    body{
+      min-height:100vh;background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;
+      display:flex;align-items:center;justify-content:center;padding:1.5rem;
+    }
+    .card{
+      background:var(--surface);border:1px solid var(--border);border-radius:14px;
+      padding:3rem 2.5rem;width:min(400px,92vw);text-align:center;box-shadow:var(--shadow-md);
+    }
+    .icon{font-size:3rem;margin-bottom:1rem}
+    h2{font-family:'Lora',serif;font-size:1.4rem;font-weight:600;margin-bottom:.75rem}
+    .error-msg{
+      color:var(--red);background:var(--red-soft);border:1px solid #fecaca;border-radius:8px;
+      padding:.75rem 1rem;font-size:.88rem;margin-bottom:1.5rem;line-height:1.5;
+    }
+    a.btn{
+      display:inline-block;padding:.7rem 1.5rem;background:var(--accent);color:#fff;border-radius:8px;
+      text-decoration:none;font-size:.9rem;font-weight:600;transition:background .15s;
+    }
+    a.btn:hover{background:var(--accent-hover)}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🚫</div>
+    <h2>Access Denied</h2>
+    <div class="error-msg">{{ error }}</div>
+    <a href="/" class="btn">Try again</a>
+  </div>
+</body>
+</html>

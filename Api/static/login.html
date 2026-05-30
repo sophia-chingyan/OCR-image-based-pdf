@@ -1,149 +1,48 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>OCR for Imaged PDF · Sign In</title>
+  <title>Sign In — OCR for Imaged PDF</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600;800&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
   <style>
-    :root {
-      --ink:     #1a1614;
-      --paper:   #f5f0e8;
-      --red:     #c0392b;
-      --muted:   #7a6e65;
-      --border:  #d4c9b8;
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#f7f5f2;--surface:#fff;--border:#e2ddd7;--text:#1c1917;
+      --text-muted:#78716c;--accent:#c2410c;--accent-soft:#fff1ec;
+      --shadow-md:0 4px 12px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.04);
     }
+    body{
+      min-height:100vh;background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;
+      display:flex;align-items:center;justify-content:center;padding:1.5rem;
+    }
+    /* subtle paper-rule texture */
+    body::before{
+      content:'';position:fixed;inset:0;pointer-events:none;
+      background-image:repeating-linear-gradient(90deg,transparent,transparent 78px,rgba(0,0,0,.025) 78px,rgba(0,0,0,.025) 79px);
+    }
+    .card{
+      position:relative;background:var(--surface);border:1px solid var(--border);border-radius:14px;
+      padding:3.25rem 2.75rem;width:min(420px,92vw);text-align:center;box-shadow:var(--shadow-md);
+    }
+    .logo-mark{font-family:'Lora',serif;font-size:3rem;line-height:1;color:var(--accent);margin-bottom:.4rem}
+    .title{font-family:'Lora',serif;font-size:1.5rem;font-weight:600;letter-spacing:-.01em;margin-bottom:.35rem}
+    .subtitle{font-size:.8rem;color:var(--text-muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:2.25rem}
+    .divider{width:42px;height:2px;background:var(--accent);margin:0 auto 2.25rem;border-radius:2px}
 
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    .sign-in-btn{
+      display:flex;align-items:center;justify-content:center;gap:.75rem;width:100%;
+      padding:.9rem 1.5rem;background:var(--surface);color:#3c4043;border:1.5px solid #dadce0;border-radius:9px;
+      font-family:'DM Sans',sans-serif;font-size:.92rem;font-weight:600;text-decoration:none;cursor:pointer;
+      transition:background .15s,box-shadow .15s,transform .1s;
+    }
+    .sign-in-btn:hover{background:#faf9f7;box-shadow:var(--shadow-md);transform:translateY(-1px)}
+    .sign-in-btn:active{transform:translateY(0)}
+    .google-icon{width:19px;height:19px;flex-shrink:0}
 
-    body {
-      min-height: 100vh;
-      background: var(--paper);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: 'Shippori Mincho', serif;
-      color: var(--ink);
-      overflow: hidden;
-    }
-
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image: repeating-linear-gradient(
-        90deg,
-        transparent,
-        transparent 60px,
-        rgba(0,0,0,0.04) 60px,
-        rgba(0,0,0,0.04) 61px
-      );
-      pointer-events: none;
-    }
-
-    .card {
-      position: relative;
-      background: #fffdf8;
-      border: 1px solid var(--border);
-      padding: 3.5rem 3rem;
-      width: min(420px, 90vw);
-      text-align: center;
-      box-shadow: 4px 4px 0 var(--border);
-    }
-
-    .card::before, .card::after {
-      content: '';
-      position: absolute;
-      width: 18px; height: 18px;
-      border-color: var(--red);
-      border-style: solid;
-    }
-    .card::before {
-      top: 10px; left: 10px;
-      border-width: 2px 0 0 2px;
-    }
-    .card::after {
-      bottom: 10px; right: 10px;
-      border-width: 0 2px 2px 0;
-    }
-
-    .logo-mark {
-      font-size: 3rem;
-      line-height: 1;
-      color: var(--red);
-      margin-bottom: 0.5rem;
-      letter-spacing: -0.05em;
-    }
-
-    .title {
-      font-size: 1.4rem;
-      font-weight: 800;
-      letter-spacing: 0.02em;
-      color: var(--ink);
-      margin-bottom: 0.3rem;
-    }
-
-    .subtitle {
-      font-family: 'DM Mono', monospace;
-      font-size: 0.72rem;
-      font-weight: 300;
-      color: var(--muted);
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      margin-bottom: 2.5rem;
-    }
-
-    .divider {
-      width: 40px;
-      height: 1px;
-      background: var(--red);
-      margin: 0 auto 2.5rem;
-    }
-
-    /* ── Google button ── */
-    .sign-in-btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.75rem;
-      width: 100%;
-      padding: 0.9rem 1.5rem;
-      background: var(--ink);
-      color: var(--paper);
-      border: none;
-      cursor: pointer;
-      font-family: 'DM Mono', monospace;
-      font-size: 0.85rem;
-      font-weight: 400;
-      letter-spacing: 0.08em;
-      text-decoration: none;
-      transition: background 0.2s, transform 0.1s;
-    }
-
-    .sign-in-btn:hover {
-      background: var(--red);
-      transform: translate(-2px, -2px);
-      box-shadow: 2px 2px 0 var(--border);
-    }
-
-    .sign-in-btn:active {
-      transform: translate(0, 0);
-      box-shadow: none;
-    }
-
-    .google-icon {
-      width: 18px; height: 18px;
-      flex-shrink: 0;
-    }
-
-    .footnote {
-      font-family: 'DM Mono', monospace;
-      font-size: 0.65rem;
-      color: var(--muted);
-      margin-top: 2rem;
-      letter-spacing: 0.05em;
-    }
+    .footnote{font-size:.72rem;color:var(--text-muted);margin-top:2rem;letter-spacing:.04em}
   </style>
 </head>
 <body>
@@ -153,13 +52,12 @@
     <div class="subtitle">Image PDF · CJK · Vertical Text</div>
     <div class="divider"></div>
 
-    <!-- Google OAuth -->
     <a href="/auth/login" class="sign-in-btn">
-      <svg class="google-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+      <svg class="google-icon" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
       </svg>
       Sign in with Google
     </a>

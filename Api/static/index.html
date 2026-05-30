@@ -1,168 +1,277 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>OCR for Imaged PDF</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
   <style>
-    :root {
-      --ink:#1a1614;--paper:#f5f0e8;--cream:#fffdf8;--red:#c0392b;--red-dim:#8b2a1f;
-      --green:#27624a;--amber:#c07000;--blue:#2563eb;--muted:#7a6e65;--border:#d4c9b8;
-    }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    body{min-height:100vh;background:var(--paper);color:var(--ink);font-family:'Shippori Mincho',serif}
-    body::before{content:'';position:fixed;inset:0;background-image:repeating-linear-gradient(90deg,transparent,transparent 80px,rgba(0,0,0,.03) 80px,rgba(0,0,0,.03) 81px);pointer-events:none;z-index:0}
-    .container{position:relative;z-index:1;max-width:860px;margin:0 auto;padding:2rem 1.5rem 4rem}
-    header{display:flex;align-items:baseline;justify-content:space-between;padding:2rem 0 1.5rem;border-bottom:1px solid var(--border);margin-bottom:2rem}
-    .brand{display:flex;align-items:baseline;gap:.75rem}
-    .brand-mark{font-size:2.2rem;color:var(--red);line-height:1}
-    .brand-title{font-size:1.15rem;font-weight:800;letter-spacing:.03em}
-    .brand-sub{font-family:'DM Mono',monospace;font-size:.68rem;font-weight:300;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-left:.25rem}
-    .logout-btn{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted);text-decoration:none;letter-spacing:.08em;border-bottom:1px solid transparent;transition:color .2s,border-color .2s}
-    .logout-btn:hover{color:var(--red);border-color:var(--red)}
-    .upload-section{margin-bottom:2.5rem}
-    .section-label{font-family:'DM Mono',monospace;font-size:.68rem;font-weight:500;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:1rem;display:flex;align-items:center;gap:.75rem}
+
+    :root{
+      --bg:#f7f5f2;
+      --surface:#ffffff;
+      --surface-2:#f0ede8;
+      --border:#e2ddd7;
+      --text:#1c1917;
+      --text-muted:#78716c;
+      --accent:#c2410c;
+      --accent-hover:#9a3412;
+      --accent-soft:#fff1ec;
+      --green:#15803d;
+      --green-soft:#f0fdf4;
+      --blue:#2563eb;
+      --amber:#c07000;
+      --red:#dc2626;
+      --red-soft:#fef2f2;
+      --shadow-sm:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
+      --shadow-md:0 4px 12px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.04);
+      --radius:10px;
+    }
+
+    body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+    /* ── Header ── */
+    .site-header{
+      background:#1c1917;border-bottom:1px solid #292524;padding:0 2rem;height:56px;
+      display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;
+    }
+    .site-header .brand{display:flex;align-items:center;gap:.55rem;text-decoration:none}
+    .brand-mark{font-family:'Lora',serif;font-size:1.5rem;color:#fb923c;line-height:1}
+    .brand-name{font-family:'Lora',serif;font-size:1.05rem;color:#fff;letter-spacing:-.01em}
+    .brand-name span{color:#fb923c}
+    .header-nav{display:flex;align-items:center;gap:.25rem}
+    .nav-link{
+      display:inline-flex;align-items:center;gap:.35rem;padding:.4rem .85rem;border-radius:6px;
+      font-size:.875rem;font-weight:500;color:#a8a29e;text-decoration:none;transition:color .15s,background .15s;
+    }
+    .nav-link:hover{color:#fff;background:rgba(255,255,255,.08)}
+    .nav-link.active{color:#fff;background:rgba(255,255,255,.12)}
+
+    .page-wrap{max-width:880px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+
+    .page-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:2rem;flex-wrap:wrap;gap:1rem}
+    .page-header h1{font-family:'Lora',serif;font-size:1.9rem;font-weight:600;letter-spacing:-.02em}
+    .page-header .subtitle{color:var(--text-muted);font-size:.9rem;margin-top:.25rem}
+
+    /* ── Buttons ── */
+    .btn{
+      display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1.1rem;border-radius:7px;
+      font-size:.875rem;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;
+      transition:all .15s;text-decoration:none;white-space:nowrap;
+    }
+    .btn-primary{background:var(--accent);color:#fff}
+    .btn-primary:hover{background:var(--accent-hover);color:#fff}
+    .btn-ghost{background:transparent;color:var(--text-muted);border:1px solid var(--border)}
+    .btn-ghost:hover{background:var(--surface-2);color:var(--text)}
+
+    /* ── Section label ── */
+    .section-label{
+      font-family:'DM Sans',sans-serif;font-size:.7rem;font-weight:600;letter-spacing:.1em;
+      text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;display:flex;align-items:center;gap:.75rem;
+    }
     .section-label::after{content:'';flex:1;height:1px;background:var(--border)}
-    .drop-zone{border:2px dashed var(--border);background:var(--cream);padding:3rem 2rem;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;position:relative}
-    .drop-zone:hover,.drop-zone.drag-over{border-color:var(--red);background:#fff9f4}
+
+    /* ── Upload ── */
+    .upload-section{margin-bottom:2.5rem}
+    .drop-zone{
+      border:2px dashed var(--border);background:var(--surface);border-radius:var(--radius);
+      padding:3rem 2rem;text-align:center;cursor:pointer;position:relative;
+      transition:border-color .2s,background .2s;box-shadow:var(--shadow-sm);
+    }
+    .drop-zone:hover,.drop-zone.drag-over{border-color:var(--accent);background:var(--accent-soft)}
     .drop-zone input[type="file"]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
-    .drop-icon{font-size:2.5rem;color:var(--border);margin-bottom:1rem;transition:color .2s}
-    .drop-zone:hover .drop-icon,.drop-zone.drag-over .drop-icon{color:var(--red)}
-    .drop-text{font-size:1rem;margin-bottom:.4rem}
-    .drop-meta{font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);letter-spacing:.06em}
+    .drop-icon{font-size:2.5rem;color:#cbc3b8;margin-bottom:.85rem;transition:color .2s}
+    .drop-zone:hover .drop-icon,.drop-zone.drag-over .drop-icon{color:var(--accent)}
+    .drop-text{font-size:1rem;margin-bottom:.4rem;font-weight:500}
+    .drop-text strong{color:var(--accent)}
+    .drop-meta{font-size:.78rem;color:var(--text-muted);letter-spacing:.02em}
 
-    /* ── Format picker ── */
-    .format-picker{display:flex;gap:1rem;margin:1rem 0 .5rem;justify-content:flex-start;flex-wrap:wrap}
-    .format-option{display:flex;align-items:center;gap:.4rem;font-family:'DM Mono',monospace;font-size:.75rem;color:var(--ink);cursor:pointer;user-select:none}
-    .format-option input[type="checkbox"]{accent-color:var(--red);width:15px;height:15px;cursor:pointer}
-    .format-desc{font-size:.62rem;color:var(--muted);display:block;margin-left:19px;margin-top:1px}
-    .format-label{font-family:'DM Mono',monospace;font-size:.65rem;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem}
+    /* ── Progress panel ── */
+    #progress-panel{
+      display:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+      padding:1.5rem;margin-bottom:2.5rem;box-shadow:var(--shadow-sm);
+    }
+    .progress-file{font-weight:600;font-size:.98rem;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem;word-break:break-word}
+    .progress-file-icon{color:var(--accent)}
 
-    /* ── Language picker ── */
-    .lang-picker{display:flex;gap:.5rem .75rem;flex-wrap:wrap;margin:.5rem 0 .25rem}
-    .lang-option{display:flex;align-items:center;gap:.35rem;font-family:'DM Mono',monospace;font-size:.72rem;color:var(--ink);cursor:pointer;user-select:none;white-space:nowrap}
-    .lang-option input[type="checkbox"]{accent-color:var(--red);width:13px;height:13px;cursor:pointer}
-    .lang-hint{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--muted);letter-spacing:.04em;margin-bottom:.6rem}
-
-    #progress-panel{display:none;background:var(--cream);border:1px solid var(--border);padding:1.5rem;margin-bottom:2.5rem}
-    .progress-file{font-weight:600;font-size:.95rem;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
-    .progress-file-icon{color:var(--red)}
-    .progress-bar-track{height:4px;background:var(--border);margin-bottom:.75rem;position:relative;overflow:hidden}
-    .progress-bar-fill{height:100%;background:var(--red);width:0%;transition:width .4s ease}
-    .progress-bar-fill.indeterminate{width:40%!important;animation:slide 1.4s infinite}
-    @keyframes slide{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
-    .progress-message{font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);letter-spacing:.04em;margin-bottom:1rem}
-    .progress-pct{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--ink);float:right}
-    .download-btn{display:inline-flex;align-items:center;gap:.5rem;padding:.55rem 1rem;background:var(--green);color:#fff;text-decoration:none;font-family:'DM Mono',monospace;font-size:.72rem;letter-spacing:.06em;transition:background .2s,transform .1s;cursor:pointer;border:none}
-    .download-btn:hover{background:#1e4d39;transform:translate(-1px,-1px)}
-    .download-btn.secondary{background:var(--ink)}
-    .download-btn.secondary:hover{background:#333}
-    .error-msg{font-family:'DM Mono',monospace;font-size:.78rem;color:var(--red);background:#fdf0ee;border-left:3px solid var(--red);padding:.6rem .8rem;margin-top:.5rem}
-
-    /* ── History cards ── */
-    .history-card{background:var(--cream);border:1px solid var(--border);padding:1rem 1.2rem;margin-bottom:.75rem;transition:border-color .15s}
-    .history-card:hover{border-color:var(--red)}
-    .history-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:.75rem;margin-bottom:.6rem}
-    .history-card-left{flex:1;min-width:0}
-    .history-card-filename{font-weight:600;font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:.25rem}
-    .history-card-meta{font-family:'DM Mono',monospace;font-size:.68rem;color:var(--muted);letter-spacing:.04em;display:flex;flex-wrap:wrap;gap:.3rem .8rem}
-    .history-card-right{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
-
-    /* ── Working status indicator (New Conversion panel) ── */
-    .working-status{display:none;align-items:center;gap:.6rem;margin-bottom:.75rem;padding:.55rem .8rem;background:#fef3cd;border-left:3px solid var(--amber)}
+    .working-status{display:none;align-items:center;gap:.6rem;margin-bottom:.9rem;padding:.55rem .85rem;background:#fffbeb;border-left:3px solid var(--amber);border-radius:6px}
     .working-status.visible{display:flex}
     .working-dot{width:8px;height:8px;border-radius:50%;background:var(--amber);flex-shrink:0;animation:pulse-dot 1.2s ease-in-out infinite}
     @keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
-    .working-label{font-family:'DM Mono',monospace;font-size:.72rem;font-weight:500;color:#856404;letter-spacing:.06em;text-transform:uppercase}
-    .working-step{font-family:'DM Mono',monospace;font-size:.7rem;color:#856404;opacity:.8;margin-left:.25rem}
+    .working-label{font-size:.72rem;font-weight:600;color:#92660b;letter-spacing:.05em;text-transform:uppercase}
+    .working-step{font-size:.72rem;color:#92660b;opacity:.85;margin-left:.25rem}
 
-    /* ── Action buttons row ── */
-    .history-card-actions{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
-    .action-btn{font-family:'DM Mono',monospace;font-size:.72rem;letter-spacing:.05em;padding:.25rem .6rem;border:none;cursor:pointer;transition:background .15s,transform .1s}
-    .action-btn:hover{transform:translate(-1px,-1px)}
-    .btn-start{background:var(--green);color:#fff}.btn-start:hover{background:#1e4d39}
-    .btn-pause{background:var(--blue);color:#fff}.btn-pause:hover{background:#1d4ed8}
-    .btn-stop{background:var(--amber);color:#fff}.btn-stop:hover{background:#8a5000}
-    .btn-delete{background:var(--red);color:#fff}.btn-delete:hover{background:var(--red-dim)}
-    .dl-link{display:inline-flex;align-items:center;gap:.3rem;padding:.25rem .6rem;background:var(--green);color:#fff;text-decoration:none;font-family:'DM Mono',monospace;font-size:.68rem;letter-spacing:.05em;transition:background .15s,transform .1s;cursor:pointer;border:none}
-    .dl-link:hover{background:#1e4d39;transform:translate(-1px,-1px)}
-    .dl-link.secondary{background:var(--ink)}
-    .dl-link.secondary:hover{background:#333}
+    .progress-message{font-size:.85rem;color:var(--text-muted)}
+    .progress-pct{font-size:.8rem;font-weight:600;color:var(--text);float:right}
+    .progress-bar-track{height:6px;background:var(--surface-2);border-radius:99px;margin:.65rem 0 0;position:relative;overflow:hidden}
+    .progress-bar-fill{height:100%;background:var(--accent);width:0%;border-radius:99px;transition:width .4s ease}
+    .progress-bar-fill.indeterminate{width:40%!important;animation:slide 1.4s infinite}
+    @keyframes slide{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
 
-    .empty-history{font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);padding:1.5rem 0;text-align:center;letter-spacing:.05em}
-    .toast{position:fixed;bottom:2rem;right:2rem;background:var(--ink);color:var(--paper);padding:.75rem 1.25rem;font-family:'DM Mono',monospace;font-size:.78rem;letter-spacing:.05em;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s;z-index:200;pointer-events:none}
+    /* Language / format picker */
+    #format-section{margin-top:1.25rem;padding-top:1.1rem;border-top:1px solid var(--border)}
+    .format-label{font-size:.7rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem}
+    .lang-picker{display:flex;gap:.5rem .9rem;flex-wrap:wrap;margin:.4rem 0 .25rem}
+    .lang-option{display:flex;align-items:center;gap:.4rem;font-size:.82rem;color:var(--text);cursor:pointer;user-select:none;white-space:nowrap}
+    .lang-option input[type="checkbox"]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+    .lang-hint{font-size:.74rem;color:var(--text-muted);margin-top:.5rem;line-height:1.45}
+
+    #progress-actions{margin-top:.25rem}
+
+    /* ── Action buttons (shared with JS-generated markup) ── */
+    .action-btn{
+      font-family:'DM Sans',sans-serif;font-size:.8rem;font-weight:600;letter-spacing:.01em;
+      padding:.4rem .85rem;border:none;border-radius:7px;cursor:pointer;transition:all .15s;color:#fff;
+    }
+    .action-btn:hover{transform:translateY(-1px)}
+    .btn-start{background:var(--green)}.btn-start:hover{background:#126b33}
+    .btn-pause{background:var(--blue)}.btn-pause:hover{background:#1d4ed8}
+    .btn-stop{background:var(--amber)}.btn-stop:hover{background:#9a5800}
+    .btn-delete{background:var(--red-soft);color:var(--red);border:1px solid #fecaca}
+    .btn-delete:hover{background:#fee2e2}
+
+    .download-btn,.dl-link{
+      display:inline-flex;align-items:center;gap:.4rem;padding:.4rem .9rem;border-radius:7px;
+      text-decoration:none;font-size:.8rem;font-weight:600;cursor:pointer;border:none;transition:all .15s;
+      background:var(--green);color:#fff;
+    }
+    .download-btn:hover,.dl-link:hover{background:#126b33;color:#fff;transform:translateY(-1px)}
+    .download-btn.secondary,.dl-link.secondary{background:var(--accent)}
+    .download-btn.secondary:hover,.dl-link.secondary:hover{background:var(--accent-hover)}
+
+    .error-msg{
+      font-size:.82rem;color:var(--red);background:var(--red-soft);border-left:3px solid var(--red);
+      padding:.6rem .85rem;border-radius:6px;margin-top:.25rem;
+    }
+
+    /* ── History cards ── */
+    #history-section{margin-top:.5rem}
+    .history-card{
+      background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+      padding:1rem 1.2rem;margin-bottom:.75rem;transition:border-color .15s,box-shadow .15s;
+    }
+    .history-card:hover{border-color:#d3cabb;box-shadow:var(--shadow-sm)}
+    .history-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:.75rem}
+    .history-card-left{flex:1;min-width:0}
+    .history-card-filename{font-weight:600;font-size:.92rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:.3rem}
+    .history-card-meta{font-size:.78rem;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:.3rem .9rem}
+    .history-card-right{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
+    .history-card-actions{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+
+    .empty-history{
+      background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);
+      font-size:.85rem;color:var(--text-muted);padding:2rem;text-align:center;
+    }
+
+    /* ── Toast ── */
+    .toast{
+      position:fixed;bottom:1.5rem;right:1.5rem;background:#1c1917;color:#fff;padding:.75rem 1.15rem;
+      border-radius:8px;font-size:.85rem;font-weight:500;box-shadow:var(--shadow-md);
+      opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s;z-index:9999;pointer-events:none;
+    }
     .toast.show{opacity:1;transform:translateY(0)}
+
+    @media (max-width:640px){
+      .site-header{padding:0 1rem}
+      .page-wrap{padding:1.5rem 1rem 3rem}
+      .nav-link span.label{display:none}
+    }
   </style>
 </head>
 <body>
-<div class="container">
-  <header>
-    <div class="brand">
+
+  <header class="site-header">
+    <a href="/" class="brand">
       <span class="brand-mark">文</span>
-      <div>
-        <span class="brand-title">OCR for Imaged PDF</span>
-        <span class="brand-sub">Gemini · CJK · Vertical Text</span>
-      </div>
-    </div>
-    <a href="/auth/logout" class="logout-btn">Sign out ↗</a>
+      <span class="brand-name">OCR<span>·</span>PDF</span>
+    </a>
+    <nav class="header-nav">
+      <a href="/" class="nav-link active">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        <span class="label">Convert</span>
+      </a>
+      <a href="/library" class="nav-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span class="label">Library</span>
+      </a>
+      <a href="/auth/logout" class="nav-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span class="label">Logout</span>
+      </a>
+    </nav>
   </header>
 
-  <!-- Upload -->
-  <div class="upload-section">
-    <div class="section-label">New Conversion</div>
-    <div class="drop-zone" id="drop-zone">
-      <input type="file" id="file-input" accept=".pdf"/>
-      <div class="drop-icon">⬆</div>
-      <div class="drop-text">Drop PDF here or click to browse</div>
-      <div class="drop-meta">Max 100 MB · Image-based PDF · CJK + English</div>
-    </div>
-  </div>
-
-  <!-- Progress panel (active job) -->
-  <div id="progress-panel">
-    <div class="progress-file">
-      <span class="progress-file-icon">📄</span>
-      <span id="progress-filename">—</span>
-    </div>
-    <div id="working-status" class="working-status">
-      <span class="working-dot"></span>
-      <span class="working-label">OCR Processing</span>
-      <span class="working-step" id="working-step"></span>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:baseline">
-      <div class="progress-message" id="progress-message">Starting…</div>
-      <div class="progress-pct" id="progress-pct">0%</div>
-    </div>
-    <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
-    <!-- Format picker shown after upload, hidden once job starts -->
-    <div id="format-section" style="display:none">
-      <div class="format-label">Output format: Clean PDF</div>
-      <div class="format-label" style="margin-top:.9rem">Language priority</div>
-      <div class="lang-picker" id="lang-picker">
-        <label class="lang-option"><input type="checkbox" value="auto" checked> Automatic Detection</label>
-        <label class="lang-option"><input type="checkbox" value="zh_tra_h"> Traditional Chinese (horizontal)</label>
-        <label class="lang-option"><input type="checkbox" value="zh_tra_v"> Traditional Chinese (vertical)</label>
-        <label class="lang-option"><input type="checkbox" value="zh_sim_h"> Simplified Chinese (horizontal)</label>
-        <label class="lang-option"><input type="checkbox" value="zh_sim_v"> Simplified Chinese (vertical)</label>
-        <label class="lang-option"><input type="checkbox" value="ja_h"> Japanese (horizontal, incl. hiragana, katakana &amp; kanji)</label>
-        <label class="lang-option"><input type="checkbox" value="ja_v"> Japanese (vertical, incl. hiragana, katakana &amp; kanji)</label>
-        <label class="lang-option"><input type="checkbox" value="ko_h"> Korean (horizontal)</label>
-        <label class="lang-option"><input type="checkbox" value="ko_v"> Korean (vertical)</label>
+  <div class="page-wrap">
+    <div class="page-header">
+      <div>
+        <h1>Convert</h1>
+        <div class="subtitle">Image PDF → clean, re-typeset PDF · CJK &amp; vertical text via Gemini</div>
       </div>
-      <div class="lang-hint">Select one or more languages to prioritize. Gemini will still detect all text — this only sets the preferred language(s).</div>
+      <a href="/library" class="btn btn-ghost">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        View Library
+      </a>
     </div>
-    <div id="progress-actions"></div>
+
+    <!-- Upload -->
+    <div class="upload-section">
+      <div class="section-label">New Conversion</div>
+      <div class="drop-zone" id="drop-zone">
+        <input type="file" id="file-input" accept=".pdf"/>
+        <div class="drop-icon">⬆</div>
+        <div class="drop-text"><strong>Drop a PDF here</strong> or click to browse</div>
+        <div class="drop-meta">Max 100 MB · Image-based PDF · CJK + English</div>
+      </div>
+    </div>
+
+    <!-- Progress panel (active job) -->
+    <div id="progress-panel">
+      <div class="progress-file">
+        <span class="progress-file-icon">📄</span>
+        <span id="progress-filename">—</span>
+      </div>
+      <div id="working-status" class="working-status">
+        <span class="working-dot"></span>
+        <span class="working-label">OCR Processing</span>
+        <span class="working-step" id="working-step"></span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div class="progress-message" id="progress-message">Starting…</div>
+        <div class="progress-pct" id="progress-pct">0%</div>
+      </div>
+      <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
+
+      <!-- Format / language picker (shown after upload, hidden once job starts) -->
+      <div id="format-section" style="display:none">
+        <div class="format-label">Output format: Clean PDF</div>
+        <div class="format-label" style="margin-top:.9rem">Language priority</div>
+        <div class="lang-picker" id="lang-picker">
+          <label class="lang-option"><input type="checkbox" value="auto" checked> Automatic Detection</label>
+          <label class="lang-option"><input type="checkbox" value="zh_tra_h"> Traditional Chinese (horizontal)</label>
+          <label class="lang-option"><input type="checkbox" value="zh_tra_v"> Traditional Chinese (vertical)</label>
+          <label class="lang-option"><input type="checkbox" value="zh_sim_h"> Simplified Chinese (horizontal)</label>
+          <label class="lang-option"><input type="checkbox" value="zh_sim_v"> Simplified Chinese (vertical)</label>
+          <label class="lang-option"><input type="checkbox" value="ja_h"> Japanese (horizontal, incl. hiragana, katakana &amp; kanji)</label>
+          <label class="lang-option"><input type="checkbox" value="ja_v"> Japanese (vertical, incl. hiragana, katakana &amp; kanji)</label>
+          <label class="lang-option"><input type="checkbox" value="ko_h"> Korean (horizontal)</label>
+          <label class="lang-option"><input type="checkbox" value="ko_v"> Korean (vertical)</label>
+        </div>
+        <div class="lang-hint">Select one or more languages to prioritize. Gemini will still detect all text — this only sets the preferred language(s).</div>
+      </div>
+      <div id="progress-actions"></div>
+    </div>
+
+    <!-- Job History -->
+    <div id="history-section">
+      <div class="section-label">Job History</div>
+      <div id="history-content"><div class="empty-history">No conversions yet.</div></div>
+    </div>
   </div>
 
-  <!-- Job History -->
-  <div id="history-section">
-    <div class="section-label">Job History</div>
-    <div id="history-content"><div class="empty-history">No conversions yet.</div></div>
-  </div>
-</div>
-<div class="toast" id="toast"></div>
+  <div class="toast" id="toast"></div>
 
 <script>
 let currentJobId = null, pollInterval = null;
@@ -178,12 +287,9 @@ function showToast(m,d=3000){toast.textContent=m;toast.classList.add('show');set
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
 
-/* ── BUG FIX: handle expired session uniformly across all API calls.
-   Previously, when the auth cookie was deleted or expired, every API
-   call returned 401 JSON but the page stayed put — the user saw a
-   stream of "Upload failed" / "Start failed" toasts with no path
-   forward. Now any 401 from the API redirects to '/', which the
-   backend renders as the login page when no valid session exists. */
+/* ── Handle expired session uniformly across all API calls. Any 401 from
+   the API redirects to '/', which the backend renders as the login page
+   when no valid session exists. */
 let _redirectingToLogin = false;
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -197,14 +303,8 @@ async function api(path, opts) {
 }
 
 /* ── Format helpers ── */
-const FORMAT_LABELS = {
-  clean: 'Clean PDF',
-};
-
-function getSelectedFormats(){
-  return ['clean'];
-}
-
+const FORMAT_LABELS = { clean: 'Clean PDF' };
+function getSelectedFormats(){ return ['clean']; }
 function getSelectedLanguageHints(){
   return [...document.querySelectorAll('#lang-picker input[type="checkbox"]:checked')]
     .map(cb => cb.value)
@@ -255,21 +355,21 @@ async function handleFile(file){
 
 function renderPendingActions(id){
   const i=esc(id);
-  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem">
+  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem">
     <button class="action-btn btn-start" data-action="start" data-job-id="${i}">▶ Start</button>
     <button class="action-btn btn-delete" data-action="delete-current" data-job-id="${i}">✕ Delete</button></div>`;
 }
 function renderStoppedActions(id){
   const i=esc(id);
   formatSection.style.display='block';
-  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem">
+  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem">
     <button class="action-btn btn-start" data-action="start" data-job-id="${i}">▶ Restart</button>
     <button class="action-btn btn-delete" data-action="delete-current" data-job-id="${i}">✕ Delete</button></div>`;
 }
 function renderPausedActions(id){
   const i=esc(id);
   formatSection.style.display='block';
-  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem">
+  progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem">
     <button class="action-btn btn-start" data-action="start" data-job-id="${i}">▶ Resume</button>
     <button class="action-btn btn-delete" data-action="delete-current" data-job-id="${i}">✕ Delete</button></div>`;
 }
@@ -288,7 +388,7 @@ async function startJob(id){
     progressMsg.textContent='Queued · '+fmts.map(f=>FORMAT_LABELS[f]||f).join(', ');
     progressPct.textContent='0%';
     const i=esc(id);
-    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem">
+    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem">
       <button class="action-btn btn-pause" data-action="pause" data-job-id="${i}">⏸ Pause</button>
       <button class="action-btn btn-stop" data-action="stop" data-job-id="${i}">⏹ Stop</button></div>`;
     startPolling(id);loadHistory();
@@ -337,12 +437,12 @@ function updateProgressUI(job){
   progressActs.innerHTML='';const id=esc(job.job_id);
   if(job.status==='done'){
     formatSection.style.display='none';
-    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center;flex-wrap:wrap">${buildDownloadButtons(job)}</div>`;
+    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center;flex-wrap:wrap">${buildDownloadButtons(job)}</div>`;
     showToast('Conversion complete!');
   }else if(job.status==='failed'){
     formatSection.style.display='none';
     progressActs.innerHTML=`<div class="error-msg">${esc(job.error||'Conversion failed.')}</div>
-      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+      <div style="display:flex;gap:.5rem;margin-top:.75rem">
         <button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Retry</button>
         <button class="action-btn btn-delete" data-action="delete-current" data-job-id="${id}">✕</button></div>`;
   }else if(job.status==='stopped'){renderStoppedActions(job.job_id)}
@@ -352,7 +452,7 @@ function updateProgressUI(job){
     renderPendingActions(job.job_id);
   }else{
     formatSection.style.display='none';
-    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.5rem">
+    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem">
     <button class="action-btn btn-pause" data-action="pause" data-job-id="${id}">⏸ Pause</button>
     <button class="action-btn btn-stop" data-action="stop" data-job-id="${id}">⏹ Stop</button></div>`;
   }
@@ -362,18 +462,21 @@ function updateProgressUI(job){
    HISTORY — card-based layout with full detail
    ══════════════════════════════════════════════════════════════════════════ */
 
+const STATUS_BADGE = {
+  pending:'⏳ Pending', queued:'⏳ Queued', processing:'⚙ Processing',
+  paused:'⏸ Paused', stopped:'⏹ Stopped', failed:'✗ Failed', done:'✓ Done'
+};
+
 function renderHistoryCard(job) {
   const id = esc(job.job_id);
   const pages = job.page_count ? `${job.page_count} pp` : '—';
   const created = fmtDate(job.created_at);
+  const status = STATUS_BADGE[job.status] || esc(job.status);
 
   const dlLink = (job.status === 'done' && job.clean_pdf_path)
     ? `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Download</a>`
     : '';
 
-  // BUG FIX (#5): Add status-dependent action buttons so users can
-  // start/resume/retry/pause/stop jobs from history cards, not just the
-  // progress panel.
   let actionBtns = '';
   if (job.status === 'pending') {
     actionBtns = `<button class="action-btn btn-start" data-action="start" data-job-id="${id}">▶ Start</button>`;
@@ -393,6 +496,7 @@ function renderHistoryCard(job) {
       <div class="history-card-left">
         <div class="history-card-filename" title="${esc(job.filename)}">${esc(job.filename)}</div>
         <div class="history-card-meta">
+          <span>${status}</span>
           <span>${pages}</span>
           <span>${created}</span>
         </div>
@@ -437,8 +541,6 @@ async function resumeActiveJobs() {
         startPolling(job.job_id);
         break;
       }
-      // BUG FIX (#5): Also re-attach the progress panel for paused/stopped/
-      // failed/pending jobs so users can resume/retry/restart them.
       if (['pending', 'paused', 'stopped', 'failed'].includes(job.status)) {
         currentJobId = job.job_id;
         progressPanel.style.display = 'block';

@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Library — OCR for Imaged PDF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+    :root{
+      --bg:#f7f5f2;--surface:#fff;--surface-2:#f0ede8;--border:#e2ddd7;
+      --text:#1c1917;--text-muted:#78716c;--accent:#c2410c;--accent-hover:#9a3412;
+      --accent-soft:#fff1ec;--green:#15803d;--green-soft:#f0fdf4;--red:#dc2626;--red-soft:#fef2f2;
+      --shadow-sm:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
+      --shadow-md:0 4px 12px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.04);
+      --radius:10px;
+    }
+
+    body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+    /* ── Header ── */
+    .site-header{
+      background:#1c1917;border-bottom:1px solid #292524;padding:0 2rem;height:56px;
+      display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;
+    }
+    .site-header .brand{display:flex;align-items:center;gap:.55rem;text-decoration:none}
+    .brand-mark{font-family:'Lora',serif;font-size:1.5rem;color:#fb923c;line-height:1}
+    .brand-name{font-family:'Lora',serif;font-size:1.05rem;color:#fff;letter-spacing:-.01em}
+    .brand-name span{color:#fb923c}
+    .header-nav{display:flex;align-items:center;gap:.25rem}
+    .nav-link{
+      display:inline-flex;align-items:center;gap:.35rem;padding:.4rem .85rem;border-radius:6px;
+      font-size:.875rem;font-weight:500;color:#a8a29e;text-decoration:none;transition:color .15s,background .15s;
+    }
+    .nav-link:hover{color:#fff;background:rgba(255,255,255,.08)}
+    .nav-link.active{color:#fff;background:rgba(255,255,255,.12)}
+
+    .page-wrap{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+
+    .page-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:2rem;flex-wrap:wrap;gap:1rem}
+    .page-header h1{font-family:'Lora',serif;font-size:1.9rem;font-weight:600;letter-spacing:-.02em}
+    .page-header h1 .count{font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:500;color:var(--text-muted);margin-left:.5rem;vertical-align:middle}
+    .header-actions{display:flex;align-items:center;gap:.75rem}
+
+    /* ── Buttons ── */
+    .btn{
+      display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1.1rem;border-radius:7px;
+      font-size:.875rem;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;
+      transition:all .15s;text-decoration:none;white-space:nowrap;
+    }
+    .btn-primary{background:var(--accent);color:#fff}
+    .btn-primary:hover{background:var(--accent-hover);color:#fff}
+    .btn-danger{background:var(--red-soft);color:var(--red);border:1px solid #fecaca}
+    .btn-danger:hover{background:#fee2e2}
+    .btn-ghost{background:transparent;color:var(--text-muted);border:1px solid var(--border)}
+    .btn-ghost:hover{background:var(--surface-2);color:var(--text)}
+    .btn-sm{padding:.35rem .75rem;font-size:.8rem}
+    .btn-icon{padding:.35rem .55rem;border-radius:6px}
+
+    /* ── States ── */
+    .loading-state,.empty-state{text-align:center;padding:5rem 2rem}
+    .empty-state .empty-icon{font-size:3.5rem;margin-bottom:1rem;opacity:.35}
+    .empty-state h2{font-family:'Lora',serif;font-size:1.4rem;color:var(--text-muted);margin-bottom:.5rem}
+    .empty-state p{color:var(--text-muted);font-size:.9rem;margin-bottom:1.5rem}
+    .loading-state{color:var(--text-muted);font-size:.9rem}
+
+    /* ── Table ── */
+    .table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-sm);overflow:hidden}
+    .table-toolbar{display:flex;align-items:center;justify-content:space-between;padding:.9rem 1.25rem;border-bottom:1px solid var(--border);background:var(--surface-2);gap:1rem;flex-wrap:wrap}
+    .toolbar-left{display:flex;align-items:center;gap:.75rem}
+    .select-all-wrap{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:var(--text-muted);cursor:pointer}
+    .select-all-wrap input[type="checkbox"]{width:15px;height:15px;cursor:pointer;accent-color:var(--accent)}
+    .selection-info{font-size:.82rem;color:var(--text-muted);padding:.25rem .6rem;background:var(--surface);border:1px solid var(--border);border-radius:20px}
+    .selection-info.has-selection{color:var(--accent);border-color:#fed7aa;background:var(--accent-soft)}
+    .toolbar-right{display:flex;align-items:center;gap:.5rem}
+
+    .book-table{width:100%;border-collapse:collapse}
+    .book-table thead{background:var(--surface-2);border-bottom:1px solid var(--border)}
+    .book-table th{padding:.6rem 1rem;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:left}
+    .book-table th:first-child{width:40px;padding-left:1.25rem}
+    .book-table th:last-child{text-align:right;padding-right:1.25rem}
+
+    .book-row{border-bottom:1px solid var(--border);transition:background .12s}
+    .book-row:last-child{border-bottom:none}
+    .book-row:hover{background:#faf9f7}
+    .book-row.selected{background:var(--accent-soft)}
+    .book-row.removing{opacity:0;transform:translateX(12px);transition:opacity .3s ease,transform .3s ease}
+
+    .book-table td{padding:.85rem 1rem;vertical-align:middle}
+    .book-table td:first-child{padding-left:1.25rem}
+    .book-table td:last-child{text-align:right;padding-right:1.25rem}
+    td input[type="checkbox"]{width:15px;height:15px;cursor:pointer;accent-color:var(--accent)}
+
+    .book-meta{display:flex;align-items:center;gap:.9rem}
+    .book-thumb-placeholder{
+      width:38px;height:52px;border-radius:4px;background:linear-gradient(135deg,#e7e5e0,#d6d3cd);
+      display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;border:1px solid var(--border);
+    }
+    .book-name{font-weight:600;font-size:.9rem;color:var(--text);line-height:1.3;word-break:break-word}
+    .book-filename{font-size:.78rem;color:var(--text-muted);margin-top:.15rem}
+
+    .badge{display:inline-block;padding:.15rem .55rem;border-radius:4px;font-size:.72rem;font-weight:700;letter-spacing:.04em}
+    .badge-pdf{background:#fee9df;color:var(--accent)}
+    .badge-expired{background:#f3f1ee;color:var(--text-muted)}
+
+    .cell-muted{font-size:.85rem;color:var(--text-muted)}
+    .row-actions{display:flex;align-items:center;gap:.4rem;justify-content:flex-end}
+    .btn-ghost[disabled]{opacity:.45;cursor:not-allowed;pointer-events:none}
+
+    /* ── Toast ── */
+    #toast-container{position:fixed;bottom:1.5rem;right:1.5rem;display:flex;flex-direction:column;gap:.5rem;z-index:9999}
+    .toast{display:flex;align-items:center;gap:.6rem;padding:.75rem 1rem;border-radius:8px;font-size:.875rem;font-weight:500;box-shadow:var(--shadow-md);animation:slideUp .25s ease;max-width:320px}
+    .toast-success{background:#1c1917;color:#fff}
+    .toast-error{background:var(--red);color:#fff}
+    @keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+    /* ── Modal ── */
+    .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;align-items:center;justify-content:center}
+    .modal-backdrop.open{display:flex}
+    .modal{background:var(--surface);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:2rem;width:100%;max-width:400px;animation:popIn .2s ease}
+    @keyframes popIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:scale(1)}}
+    .modal h3{font-family:'Lora',serif;font-size:1.2rem;margin-bottom:.6rem;color:var(--text)}
+    .modal p{font-size:.9rem;color:var(--text-muted);margin-bottom:1.5rem;line-height:1.5}
+    .modal p strong{color:var(--text)}
+    .modal-actions{display:flex;gap:.75rem;justify-content:flex-end}
+
+    @media (max-width:640px){
+      .site-header{padding:0 1rem}
+      .page-wrap{padding:1.5rem 1rem 3rem}
+      .nav-link span.label{display:none}
+      .book-table th:nth-child(3),.book-table td:nth-child(3){display:none}
+      .book-table th:nth-child(4),.book-table td:nth-child(4){display:none}
+    }
+  </style>
+</head>
+<body>
+
+  <header class="site-header">
+    <a href="/" class="brand">
+      <span class="brand-mark">文</span>
+      <span class="brand-name">OCR<span>·</span>PDF</span>
+    </a>
+    <nav class="header-nav">
+      <a href="/" class="nav-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        <span class="label">Convert</span>
+      </a>
+      <a href="/library" class="nav-link active">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span class="label">Library</span>
+      </a>
+      <a href="/auth/logout" class="nav-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span class="label">Logout</span>
+      </a>
+    </nav>
+  </header>
+
+  <div class="page-wrap">
+    <div class="page-header">
+      <h1>Library <span class="count" id="book-count"></span></h1>
+      <div class="header-actions">
+        <a href="/" class="btn btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Convert New
+        </a>
+      </div>
+    </div>
+
+    <!-- Render targets -->
+    <div id="loading-state" class="loading-state">Loading your library…</div>
+    <div id="empty-state" class="empty-state" style="display:none">
+      <div class="empty-icon">📚</div>
+      <h2>No converted PDFs yet</h2>
+      <p>Convert an image-based PDF to get started. Completed documents appear here.</p>
+      <a href="/" class="btn btn-primary">Convert a file</a>
+    </div>
+
+    <div class="table-wrap" id="table-wrap" style="display:none">
+      <div class="table-toolbar">
+        <div class="toolbar-left">
+          <label class="select-all-wrap">
+            <input type="checkbox" id="select-all">
+            <span>Select all</span>
+          </label>
+          <span class="selection-info" id="selection-info">0 selected</span>
+        </div>
+        <div class="toolbar-right">
+          <button class="btn btn-danger btn-sm" id="btn-delete-selected" style="display:none" onclick="deleteSelected()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete Selected
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btn-delete-all" onclick="confirmDeleteAll()">Delete All</button>
+        </div>
+      </div>
+
+      <table class="book-table" id="book-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Document</th>
+            <th>Format</th>
+            <th>Pages</th>
+            <th>Converted</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="book-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop">
+    <div class="modal">
+      <h3 id="modal-title">Delete file?</h3>
+      <p id="modal-body">This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-danger" id="modal-confirm-btn" onclick="modalConfirm()">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script>
+    let modalAction = null;
+    const $ = id => document.getElementById(id);
+
+    function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+    function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'})}
+
+    /* ── 401 → login redirect (same pattern as the Convert page) ── */
+    let _redirectingToLogin = false;
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      if (res.status === 401 && !_redirectingToLogin) {
+        _redirectingToLogin = true;
+        showToast('Session expired — redirecting to sign in…', 'error');
+        setTimeout(() => { window.location.href = '/'; }, 800);
+      }
+      return res;
+    }
+
+    /* ── Load completed conversions from job history ── */
+    async function loadLibrary() {
+      try {
+        const res = await api('/api/history');
+        if (!res.ok) { $('loading-state').textContent = 'Could not load library.'; return; }
+        const jobs = await res.json();
+        // Only completed conversions belong in the Library.
+        const done = jobs.filter(j => j.status === 'done');
+        renderLibrary(done);
+      } catch (err) {
+        $('loading-state').textContent = 'Could not load library: ' + err.message;
+      }
+    }
+
+    function renderLibrary(jobs) {
+      $('loading-state').style.display = 'none';
+
+      if (!jobs.length) {
+        $('table-wrap').style.display = 'none';
+        $('empty-state').style.display = 'block';
+        $('book-count').textContent = '';
+        return;
+      }
+
+      $('empty-state').style.display = 'none';
+      $('table-wrap').style.display = 'block';
+      $('book-count').textContent = jobs.length + ' document' + (jobs.length !== 1 ? 's' : '');
+
+      $('book-tbody').innerHTML = jobs.map(rowHTML).join('');
+      updateSelectionUI();
+    }
+
+    function rowHTML(job) {
+      const id = esc(job.job_id);
+      const name = esc(job.filename || 'Untitled');
+      const stem = esc((job.filename || 'Untitled').replace(/\.pdf$/i, ''));
+      const pages = job.page_count ? job.page_count : '—';
+      const date = fmtDate(job.created_at);
+      const available = !!job.clean_pdf_path;
+
+      const formatBadge = available
+        ? '<span class="badge badge-pdf">CLEAN PDF</span>'
+        : '<span class="badge badge-expired">EXPIRED</span>';
+
+      const downloadBtn = available
+        ? `<a href="/api/download/${id}/clean" class="btn btn-ghost btn-sm" download title="Download">
+             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+             Download
+           </a>`
+        : `<button class="btn btn-ghost btn-sm" disabled title="Output file no longer available">Unavailable</button>`;
+
+      return `<tr class="book-row" data-job-id="${id}" data-stem="${stem}">
+        <td><input type="checkbox" class="row-checkbox" value="${id}"></td>
+        <td>
+          <div class="book-meta">
+            <div class="book-thumb-placeholder">📄</div>
+            <div>
+              <div class="book-name">${stem}</div>
+              <div class="book-filename">${name}</div>
+            </div>
+          </div>
+        </td>
+        <td>${formatBadge}</td>
+        <td><span class="cell-muted">${pages}${pages !== '—' ? ' pp' : ''}</span></td>
+        <td><span class="cell-muted">${date}</span></td>
+        <td>
+          <div class="row-actions">
+            ${downloadBtn}
+            <button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="confirmDeleteOne('${id}', '${stem}')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M9 6V4h6v2"/></svg>
+            </button>
+          </div>
+        </td>
+      </tr>`;
+    }
+
+    /* ── Selection ── */
+    const selectAll = $('select-all');
+    const selectionInfo = $('selection-info');
+    const btnDeleteSelected = $('btn-delete-selected');
+
+    function getChecked(){ return [...document.querySelectorAll('.row-checkbox:checked')]; }
+
+    function updateSelectionUI() {
+      const checked = getChecked();
+      const count = checked.length;
+      selectionInfo.textContent = count + ' selected';
+      selectionInfo.classList.toggle('has-selection', count > 0);
+      btnDeleteSelected.style.display = count > 0 ? 'inline-flex' : 'none';
+      const allBoxes = document.querySelectorAll('.row-checkbox');
+      selectAll.indeterminate = count > 0 && count < allBoxes.length;
+      selectAll.checked = allBoxes.length > 0 && count === allBoxes.length;
+      document.querySelectorAll('.book-row').forEach(row => {
+        const cb = row.querySelector('.row-checkbox');
+        row.classList.toggle('selected', cb && cb.checked);
+      });
+    }
+
+    document.addEventListener('change', e => {
+      if (e.target.classList.contains('row-checkbox')) updateSelectionUI();
+    });
+
+    selectAll.addEventListener('change', () => {
+      document.querySelectorAll('.row-checkbox').forEach(cb => { cb.checked = selectAll.checked; });
+      updateSelectionUI();
+    });
+
+    /* ── Modal ── */
+    function openModal(title, body, action) {
+      $('modal-title').textContent = title;
+      $('modal-body').innerHTML = body;
+      modalAction = action;
+      $('modal-backdrop').classList.add('open');
+    }
+    function closeModal(){ $('modal-backdrop').classList.remove('open'); modalAction = null; }
+    function modalConfirm(){ const a = modalAction; closeModal(); if (a) a(); }
+    $('modal-backdrop').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+
+    /* ── Toast ── */
+    function showToast(message, type = 'success') {
+      const container = $('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+      toast.textContent = (type === 'success' ? '✓ ' : '✗ ') + message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 3500);
+    }
+
+    /* ── Delete flows (wired to DELETE /api/delete/{job_id}) ── */
+    function confirmDeleteOne(jobId, stem) {
+      openModal('Delete this document?', `<strong>${stem}</strong> and its files will be permanently removed.`, () => deleteJobs([jobId]));
+    }
+
+    function deleteSelected() {
+      const ids = getChecked().map(cb => cb.value);
+      if (!ids.length) return;
+      const noun = ids.length === 1 ? '1 document' : ids.length + ' documents';
+      openModal('Delete selected?', `<strong>${noun}</strong> will be permanently removed.`, () => deleteJobs(ids));
+    }
+
+    function confirmDeleteAll() {
+      const ids = [...document.querySelectorAll('.book-row')].map(r => r.dataset.jobId);
+      if (!ids.length) return;
+      openModal('Delete all documents?',
+        `All <strong>${ids.length}</strong> document${ids.length !== 1 ? 's' : ''} in your library will be permanently removed.`,
+        () => deleteJobs(ids));
+    }
+
+    async function deleteJobs(jobIds) {
+      let ok = 0, fail = 0;
+      await Promise.all(jobIds.map(async id => {
+        try {
+          const res = await api('/api/delete/' + encodeURIComponent(id), { method: 'DELETE' });
+          if (res.ok) {
+            const row = document.querySelector(`.book-row[data-job-id="${CSS.escape(id)}"]`);
+            if (row) animateRemove(row);
+            ok++;
+          } else { fail++; }
+        } catch { fail++; }
+      }));
+      setTimeout(updateCount, 350);
+      if (ok)   showToast(`Deleted ${ok} document${ok !== 1 ? 's' : ''}`);
+      if (fail) showToast(`${fail} deletion${fail !== 1 ? 's' : ''} failed`, 'error');
+      setTimeout(updateSelectionUI, 360);
+    }
+
+    function animateRemove(row){ row.classList.add('removing'); setTimeout(() => row.remove(), 300); }
+
+    function updateCount() {
+      const remaining = document.querySelectorAll('.book-row').length;
+      const countEl = $('book-count');
+      if (remaining === 0) {
+        $('table-wrap').style.display = 'none';
+        $('empty-state').style.display = 'block';
+        countEl.textContent = '';
+      } else {
+        countEl.textContent = remaining + ' document' + (remaining !== 1 ? 's' : '');
+      }
+    }
+
+    /* ── Init ── */
+    loadLibrary();
+  </script>
+</body>
+</html>
