@@ -11,6 +11,9 @@ Changes from original:
   out during image-only page detection to prevent page explosion in clean PDF.
 - `detect_dominant_language()` helper aggregates per-page text to determine
   the document's primary script.
+- StructuredElement gains a `lines` field carrying per-line TextLine objects
+  from the OCR engine, used by the searchable PDF assembler for tight
+  per-line (or per-character-column) invisible text overlay.
 """
 
 from __future__ import annotations
@@ -19,37 +22,32 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ocr_engine import TextBlock, LayoutBlock, BBox, TextDirection, LayoutType
+from ocr_engine import TextBlock, TextLine, LayoutBlock, BBox, TextDirection, LayoutType
 from pdf_ingestion import PageInfo
 
 logger = logging.getLogger(__name__)
 
 # ── Minimum image dimensions (pixels) to be considered meaningful content ────
-# Images smaller than this on EITHER axis are treated as decorative
-# (icons, separator dots, leaf ornaments, etc.) and excluded from
-# image-only pages.  They are still embedded on pages that have text.
 MIN_IMAGE_PIXELS = 150
 
 
 @dataclass
 class StructuredElement:
     """A single semantic element within a page."""
-    element_type: LayoutType   # heading, paragraph, list-item, etc.
+    element_type: LayoutType
     text: str
-    level: int = 1             # heading level (1–3), ignored for non-headings
+    level: int = 1
     direction: TextDirection = "horizontal"
-    href: Optional[str] = None # if this element is a hyperlink
-    # Pixel-space bounding box (same coord system as TextBlock.bbox) if known.
-    # The text-layer PDF assembler uses this to align the invisible OCR
-    # overlay with the visible scanned text underneath. None on fallback paths.
+    href: Optional[str] = None
     bbox: Optional[BBox] = None
+    lines: List[TextLine] = field(default_factory=list)  # per-line boxes from OCR
 
 
 @dataclass
 class StructuredImage:
     image_bytes: bytes
     ext: str
-    image_id: str              # unique ID for image media item
+    image_id: str
     alt_text: str = ""
 
 
@@ -60,7 +58,6 @@ class StructuredPage:
     elements: List[StructuredElement] = field(default_factory=list)
     images: List[StructuredImage]     = field(default_factory=list)
     is_image_only: bool = False
-    # Pixel-space dimensions of the rasterised page used for OCR.
     width_px: float = 0.0
     height_px: float = 0.0
 
@@ -70,17 +67,12 @@ class DocumentStructure:
     title: str
     author: str
     pages: List[StructuredPage]
-    toc: List[tuple]           # [(level, title, page_num)]
-    # NEW: dominant language code across the whole document, used by PDF
-    # assemblers to select the correct CJK font.  Values mirror the codes
-    # from gemini_engine._detect_lang_from_text: "ch_tra", "ch_sim",
-    # "japan", "korean", "en".
+    toc: List[tuple]
     dominant_language: str = "ch_tra"
 
 
 # ── Language detection (document-level) ──────────────────────────────────────
 
-# Traditional-Chinese-specific characters (a broader set than gemini_engine's)
 _TRAD_ONLY_CHARS = set(
     "書學說這個們來對還過時從會點無問題經開與應該實際關體認識"
     "種處學後當動過變還問題從來對說這個點無開與應該實際關體認識種處學後"
@@ -109,18 +101,13 @@ def _in_range(char: str, lo: int, hi: int) -> bool:
 
 
 def detect_dominant_language(pages: List[StructuredPage]) -> str:
-    """
-    Aggregate all OCR text across pages and determine the dominant script.
-
-    Returns one of: "ch_tra", "ch_sim", "japan", "korean", "en".
-    """
     all_text = ""
     for p in pages:
         for el in p.elements:
             all_text += el.text
 
     if not all_text:
-        return "ch_tra"   # safe default for CJK-heavy corpus
+        return "ch_tra"
 
     has_hangul   = any(_in_range(c, *HANGUL_RANGE) for c in all_text)
     has_hiragana = any(_in_range(c, *HIRAGANA_RANGE) for c in all_text)
@@ -137,27 +124,20 @@ def detect_dominant_language(pages: List[StructuredPage]) -> str:
     if has_cjk:
         trad_count = sum(1 for c in all_text if c in _TRAD_ONLY_CHARS)
         simp_count = sum(1 for c in all_text if c in _SIMP_ONLY_CHARS)
-        # Default to Traditional if counts are equal or ambiguous
         return "ch_sim" if simp_count > trad_count * 2 else "ch_tra"
     return "en"
 
 
-# ── Image size helpers ───────────────────────────────────────────────────────
+# ── Image size helpers ────────────────────────────────────────────────────────
 
 def _image_dimensions(img_bytes: bytes) -> tuple[int, int]:
-    """
-    Quickly read width/height from image bytes without decoding the full
-    image. Supports JPEG and PNG headers; returns (0, 0) on failure.
-    """
     if not img_bytes or len(img_bytes) < 24:
         return (0, 0)
-    # PNG: bytes 16-23 contain width (4B) and height (4B)
     if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
         import struct
         w = struct.unpack('>I', img_bytes[16:20])[0]
         h = struct.unpack('>I', img_bytes[20:24])[0]
         return (w, h)
-    # JPEG: scan for SOFn markers
     if img_bytes[:2] == b'\xff\xd8':
         import struct
         i = 2
@@ -175,40 +155,26 @@ def _image_dimensions(img_bytes: bytes) -> tuple[int, int]:
 
 
 def _is_significant_image(img) -> bool:
-    """
-    Return True if the image is large enough to be meaningful content
-    (not a decorative icon / separator / tiny ornament).
-    """
     w, h = _image_dimensions(img.image_bytes)
     if w == 0 and h == 0:
-        # Cannot determine size — keep it to be safe, but also check
-        # byte size as a rough proxy.
         return len(img.image_bytes) > 5000
     return w >= MIN_IMAGE_PIXELS and h >= MIN_IMAGE_PIXELS
 
 
-# Threshold: if an image covers more than this fraction of the page area,
-# it's considered "page-spanning" (i.e. the scanned page image itself).
 _PAGE_SPAN_THRESHOLD = 0.6
 
 
 def _is_page_spanning_image(img, page_info: "PageInfo") -> bool:
-    """
-    Return True if the image covers most of the page area. Used to detect
-    the full-page scan image on scanned/image PDFs so it isn't re-embedded
-    alongside the OCR text.
-    """
-    # img.bbox is in PDF point coordinates (same as page_info.width/height)
-    img_width = abs(img.bbox.x1 - img.bbox.x0)
+    img_width  = abs(img.bbox.x1 - img.bbox.x0)
     img_height = abs(img.bbox.y1 - img.bbox.y0)
-    page_area = page_info.width * page_info.height
+    page_area  = page_info.width * page_info.height
     if page_area <= 0:
         return False
     img_area = img_width * img_height
     return (img_area / page_area) >= _PAGE_SPAN_THRESHOLD
 
 
-# ── Page analysis ────────────────────────────────────────────────────────────
+# ── Page analysis ─────────────────────────────────────────────────────────────
 
 def analyse_page(
     page_number: int,
@@ -216,20 +182,12 @@ def analyse_page(
     layout_blocks: List[LayoutBlock],
     page_info: PageInfo,
     direction: TextDirection,
-    image_id_counter: list,   # mutable counter [int]
+    image_id_counter: list,
     dpi: int = 400,
 ) -> StructuredPage:
-    """
-    Combine OCR text blocks, layout classifications, and page metadata
-    into a StructuredPage.
-    """
-    # Scale page dimensions from PDF points to pixel space so that
-    # bbox coordinates (in pixels from OCR at `dpi`) can be compared
-    # against page dimensions in the same coordinate system.
-    # PDF default is 72 DPI; page_info.width/height are in PDF points.
-    dpi_scale       = dpi / 72.0
-    page_width_px   = page_info.width  * dpi_scale
-    page_height_px  = page_info.height * dpi_scale
+    dpi_scale     = dpi / 72.0
+    page_width_px  = page_info.width  * dpi_scale
+    page_height_px = page_info.height * dpi_scale
 
     page = StructuredPage(
         page_number=page_number,
@@ -240,8 +198,6 @@ def analyse_page(
 
     # ── Image-only page detection ────────────────────────────────────────────
     if not text_blocks and page_info.images:
-        # FIX: filter out tiny decorative images to prevent page explosion
-        # in the clean PDF (each tiny icon was becoming a full A4 page).
         significant_images = [img for img in page_info.images
                               if _is_significant_image(img)]
         if significant_images:
@@ -258,24 +214,18 @@ def analyse_page(
                          f"tiny decorative image(s)")
         return page
 
-    # ── Compute font-size statistics for heading detection ───────────────────
+    # ── Font-size statistics ─────────────────────────────────────────────────
     sizes = [b.font_size_estimate for b in text_blocks if b.font_size_estimate > 0]
     median_size = sorted(sizes)[len(sizes) // 2] if sizes else 12.0
 
     # ── Match layout blocks to text blocks ───────────────────────────────────
-    # Both layout_blocks and text_blocks come from the OCR engine, so their
-    # bboxes share the same pixel coordinate system.
-    layout_map: dict[int, LayoutType] = {}   # index into text_blocks → type
+    layout_map: dict[int, LayoutType] = {}
     for lb in layout_blocks:
         for i, tb in enumerate(text_blocks):
             if lb.bbox.overlaps(tb.bbox, threshold=0.3):
                 layout_map[i] = lb.block_type
 
     # ── Match hyperlinks to text blocks ──────────────────────────────────────
-    # FIX #2: Use "fraction of the link covered by the block" instead of IoU.
-    # A hyperlink typically covers one word inside a large paragraph, so IoU
-    # is tiny. Instead we check if at least 50% of the link area falls within
-    # the text block.
     link_map: dict[int, str] = {}
     for link in page_info.links:
         link_bbox_px = BBox(
@@ -307,20 +257,13 @@ def analyse_page(
             direction=tb.direction,
             href=href,
             bbox=tb.bbox,
+            lines=tb.lines,
         ))
 
-    # ── Embed images that appear on this page ────────────────────────────────
-    # BUG FIX (#1): For scanned/image PDFs, each page is one large embedded
-    # image. After Gemini OCRs it, text_blocks is non-empty so we reach this
-    # code path. The full-page scan passes _is_significant_image (way over
-    # 150px) and gets embedded alongside the OCR text — duplicating content
-    # and bloating the file. Skip images that span most of the page when
-    # OCR has already produced text for this page.
+    # ── Embed non-spanning images on this page ───────────────────────────────
     for img in page_info.images:
         if not _is_significant_image(img):
             continue
-        # Skip page-spanning images on pages where OCR produced text.
-        # These are almost certainly the scanned page image itself.
         if text_blocks and _is_page_spanning_image(img, page_info):
             continue
         image_id_counter[0] += 1
@@ -339,30 +282,19 @@ def _infer_type(
     page_info: PageInfo,
     page_height_px: float,
 ) -> LayoutType:
-    """Fallback type inference when layout analysis doesn't cover a block."""
     size = tb.font_size_estimate
-
-    # Page number heuristic: short, numeric, near top/bottom
     text = tb.text.strip()
     if re.fullmatch(r"\d{1,4}", text):
         y_center = (tb.bbox.y0 + tb.bbox.y1) / 2
-        # Both y_center and page_height_px are in pixel space.
         if y_center < page_height_px * 0.1 or y_center > page_height_px * 0.9:
             return "page-number"
-
-    # Heading: significantly larger than median
     if size > median_size * 1.4:
         return "heading"
-
-    # Footnote: significantly smaller than median, near bottom
     y_center = (tb.bbox.y0 + tb.bbox.y1) / 2
     if size < median_size * 0.75 and y_center > page_height_px * 0.8:
         return "footnote"
-
-    # List item: starts with bullet or number pattern
     if re.match(r"^[•·▪▸\-\*]|^\d+[.)、]\s", text):
         return "list-item"
-
     return "paragraph"
 
 
@@ -375,10 +307,6 @@ def _heading_level(font_size: float, median: float) -> int:
 
 
 def build_toc(pages: List[StructuredPage]) -> List[tuple]:
-    """
-    Build a table of contents from heading elements across all pages.
-    Returns list of (level, title, page_number).
-    """
     toc = []
     for p in pages:
         for el in p.elements:

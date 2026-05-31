@@ -1,23 +1,29 @@
 """
 PDF Assembly
 ============
-Clean PDF output mode from OCR results:
+Two output modes:
 
 Clean PDF (方案 A) — assemble_clean_pdf()
    Re-renders OCR text into a cleanly typeset PDF using ReportLab.
 
+Searchable PDF (方案 B) — assemble_searchable_pdf()
+   Keeps the original scanned pages pixel-for-pixel, and overlays an
+   INVISIBLE OCR text layer using PyMuPDF render_mode=3 so the text is
+   selectable, copyable, and searchable without altering the appearance.
+   Per-line bboxes (horizontal) and per-character-column distribution
+   (vertical CJK) give tight selection alignment.
+
 Font selection:
 - Traditional Chinese → MSung-Light (ReportLab) / china-t (PyMuPDF)
 - Simplified Chinese  → STSong-Light / china-s
-- Japanese            → HeiseiMin-W3 / china-s (closest available)
+- Japanese            → HeiseiMin-W3 / japan
 - Korean              → HYSMyeongJo-Medium / korea
-- _register_best_font() selects the ReportLab CID font; _get_fitz_font_name()
-  selects the PyMuPDF built-in CJK font; both accept a language arg.
 """
 
 from __future__ import annotations
 import io
 import re
+import shutil
 import logging
 from pathlib import Path
 from typing import List
@@ -34,15 +40,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_fitz_font_name(language: str) -> str:
-    """
-    Return the PyMuPDF built-in CJK font identifier for the given language.
-
-    PyMuPDF font names:
-      china-s  → Simplified Chinese  (Adobe-GB1)
-      china-t  → Traditional Chinese (Adobe-CNS1)
-      japan    → Japanese             (Adobe-Japan1)
-      korea    → Korean               (Adobe-Korea1)
-    """
     lang_map = {
         "ch_tra": "china-t",
         "ch_sim": "china-s",
@@ -55,17 +52,6 @@ def _get_fitz_font_name(language: str) -> str:
 
 
 def _register_best_font(pdfmetrics, UnicodeCIDFont, language: str = "ch_tra") -> str:
-    """
-    Try CJK CID fonts in order appropriate for `language`; return the
-    name of the first that registers successfully.
-
-    ReportLab CID font → CMap mapping:
-      STSong-Light      → UniGB-UCS2-H   (Adobe-GB1, Simplified Chinese)
-      MSung-Light       → UniCNS-UCS2-H  (Adobe-CNS1, Traditional Chinese)
-      HeiseiMin-W3      → UniJIS-UCS2-H  (Adobe-Japan1)
-      HYSMyeongJo-Medium → UniKS-UCS2-H  (Adobe-Korea1)
-    """
-    # Order candidates by language preference
     if language == "ch_sim":
         candidates = ["STSong-Light", "MSung-Light", "HeiseiMin-W3", "HYSMyeongJo-Medium"]
     elif language == "japan":
@@ -73,7 +59,6 @@ def _register_best_font(pdfmetrics, UnicodeCIDFont, language: str = "ch_tra") ->
     elif language == "korean":
         candidates = ["HYSMyeongJo-Medium", "MSung-Light", "STSong-Light", "HeiseiMin-W3"]
     else:
-        # Default: Traditional Chinese (ch_tra or unknown)
         candidates = ["MSung-Light", "STSong-Light", "HeiseiMin-W3", "HYSMyeongJo-Medium"]
 
     for fname in candidates:
@@ -86,6 +71,7 @@ def _register_best_font(pdfmetrics, UnicodeCIDFont, language: str = "ch_tra") ->
     logger.warning(f"No CJK CID font registered for language={language}, falling back to Helvetica")
     return "Helvetica"
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 方案 A: Clean PDF — reflowed text with proper typography
 # ─────────────────────────────────────────────────────────────────────────────
@@ -96,13 +82,9 @@ def assemble_clean_pdf(
 ) -> None:
     """
     Re-render OCR text into a cleanly typeset PDF.
-
-    Tries ReportLab first for professional output. If that fails for ANY
-    reason (empty document, font issues, XML parsing errors), falls back
-    to PyMuPDF-based rendering which always succeeds.
+    Tries ReportLab first; falls back to PyMuPDF on any failure.
     """
     logger.info(f"Assembling clean PDF: {output_path}")
-
     try:
         _assemble_clean_pdf_reportlab(structure, output_path)
         logger.info(f"Clean PDF written (ReportLab): {output_path} "
@@ -123,7 +105,6 @@ def _assemble_clean_pdf_reportlab(
     structure: DocumentStructure,
     output_path: Path,
 ) -> None:
-    """ReportLab-based clean PDF. May raise on empty/problematic content."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
@@ -134,7 +115,6 @@ def _assemble_clean_pdf_reportlab(
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
-    # FIX: pass document language so the correct CMap is used
     cjk_font = _register_best_font(pdfmetrics, UnicodeCIDFont,
                                     language=structure.dominant_language)
     logger.info(f"Clean PDF using font: {cjk_font}")
@@ -158,8 +138,7 @@ def _assemble_clean_pdf_reportlab(
     s_auth  = _style("A", fontSize=12, leading=18, alignment=TA_CENTER)
     hs = {1: s_h1, 2: s_h2, 3: s_h3}
 
-    # ── Collect ALL renderable paragraphs first, then build story ────────────
-    content_paragraphs: list = []   # list of flowable-lists, one per page
+    content_paragraphs: list = []
 
     for page in structure.pages:
         page_items: list = []
@@ -208,7 +187,6 @@ def _assemble_clean_pdf_reportlab(
         if page_items:
             content_paragraphs.append(page_items)
 
-    # ── Build story: title page + content pages ──────────────────────────────
     story: list = []
 
     if structure.title:
@@ -233,9 +211,7 @@ def _assemble_clean_pdf_reportlab(
         ))
 
     if not story:
-        story.append(Paragraph(
-            _esc(structure.title or "Untitled"), s_title
-        ))
+        story.append(Paragraph(_esc(structure.title or "Untitled"), s_title))
         story.append(Spacer(1, 10 * mm))
         story.append(Paragraph(
             "[ No text content could be extracted from this PDF ]", s_body
@@ -256,21 +232,14 @@ def _assemble_clean_pdf_pymupdf(
     structure: DocumentStructure,
     output_path: Path,
 ) -> None:
-    """
-    Fallback clean PDF renderer using only PyMuPDF.
-    Less pretty than ReportLab but handles CJK text reliably and never
-    throws "Document is empty".
-    """
     doc = fitz.open()
-    # FIX: select the correct CJK font for the document's language
     fitz_font_name = _get_fitz_font_name(structure.dominant_language)
     font = fitz.Font(fitz_font_name)
 
-    title = structure.title or "Untitled"
+    title  = structure.title or "Untitled"
     author = structure.author or ""
 
-    # ── Title page ────────────────────────────────────────────────────────────
-    page = doc.new_page(width=595, height=842)  # A4 in points
+    page = doc.new_page(width=595, height=842)
     try:
         tw = fitz.TextWriter(page.rect)
         tw.append(pos=(72, 200), text=title[:100], font=font, fontsize=20)
@@ -363,7 +332,6 @@ def _assemble_clean_pdf_pymupdf(
 
 
 def _wrap_text_fitz(text: str, font, fontsize: float, max_width: float) -> List[str]:
-    """Wrap text to fit within max_width using PyMuPDF font metrics."""
     lines = []
     for raw_line in text.split("\n"):
         if not raw_line.strip():
@@ -387,21 +355,233 @@ def _wrap_text_fitz(text: str, font, fontsize: float, max_width: float) -> List[
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 方案 B: Searchable PDF — original scan + invisible OCR text layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def assemble_searchable_pdf(
+    structure: DocumentStructure,
+    source_pdf_path: Path,
+    output_path: Path,
+    dpi: int = 400,
+) -> None:
+    """
+    Produce a "searchable PDF": the original scanned pages are preserved
+    exactly, with an INVISIBLE OCR text layer overlaid on top so the text
+    becomes selectable / copyable / searchable while the document still looks
+    identical to the original scan.
+
+    Per-line bboxes (horizontal text) and per-character-column distribution
+    (vertical CJK text) give tight selection alignment that matches each
+    visible text line rather than the whole paragraph block.
+
+    Coordinate systems
+    -------------------
+    OCR bboxes on each StructuredElement / TextLine are in *pixel* space at
+    the rasterization DPI (default 400). PDF content is in *points* (72/inch).
+    We convert pixels → points with the factor 72/dpi.
+
+    Robustness
+    ----------
+    If the overlay step fails, we fall back to copying the original PDF so
+    the user still gets a valid, viewable file.
+    """
+    source_pdf_path = Path(source_pdf_path)
+    logger.info(f"Assembling searchable PDF: {output_path}")
+    try:
+        _assemble_searchable_pdf_impl(structure, source_pdf_path, output_path, dpi)
+        logger.info(f"Searchable PDF written: {output_path} "
+                    f"({output_path.stat().st_size/1024:.1f} KB)")
+    except Exception as e:
+        logger.warning(f"Searchable overlay failed ({e}); "
+                       f"falling back to a copy of the original PDF")
+        try:
+            shutil.copyfile(str(source_pdf_path), str(output_path))
+        except Exception as e2:
+            logger.error(f"Could not copy original PDF ({e2}); writing minimal PDF")
+            _write_minimal_pdf(output_path, structure.title or "Untitled",
+                               f"Searchable PDF assembly error: {e}")
+
+
+def _assemble_searchable_pdf_impl(
+    structure: DocumentStructure,
+    source_pdf_path: Path,
+    output_path: Path,
+    dpi: int,
+) -> None:
+    doc = fitz.open(str(source_pdf_path))
+
+    try:
+        font = fitz.Font(_get_fitz_font_name(structure.dominant_language))
+    except Exception:
+        font = fitz.Font("china-t")
+
+    px_to_pt  = 72.0 / float(dpi if dpi else 400)
+    page_map  = {p.page_number: p for p in structure.pages}
+    overlaid  = 0
+
+    for pno in range(doc.page_count):
+        sp = page_map.get(pno)
+        if sp is None:
+            continue
+        page      = doc[pno]
+        page_rect = page.rect
+
+        for el in sp.elements:
+            text = (el.text or "").strip()
+            if not text:
+                continue
+            direction = el.direction or "horizontal"
+
+            # Prefer per-line overlay for tight selection alignment.
+            used_lines = False
+            for ln in (el.lines or []):
+                lt = (ln.text or "").strip()
+                if not lt or ln.bbox is None:
+                    continue
+                rect = _clamp_px_rect(ln.bbox, px_to_pt, page_rect)
+                if rect is None:
+                    continue
+                if direction == "vertical":
+                    ok = _overlay_vertical_line(page, rect, lt, font)
+                else:
+                    ok = _overlay_horizontal_line(page, rect, lt, font)
+                if ok:
+                    overlaid += 1
+                    used_lines = True
+
+            if used_lines:
+                continue  # avoid duplicating text with a block-level pass
+
+            # Fall back to block-level overlay: single-line blocks, or when
+            # the model returned no usable per-line boxes.
+            if el.bbox is None:
+                continue
+            rect = _clamp_px_rect(el.bbox, px_to_pt, page_rect)
+            if rect is None:
+                continue
+            if _overlay_invisible_text(page, rect, text, font):
+                overlaid += 1
+
+    logger.info(f"Searchable PDF: overlaid {overlaid} text segment(s) "
+                f"across {doc.page_count} page(s)")
+    doc.save(str(output_path), garbage=4, deflate=True)
+    doc.close()
+
+
+def _clamp_px_rect(bbox, px_to_pt: float, page_rect):
+    """Pixel-space BBox → clamped PDF-point fitz.Rect, or None if degenerate."""
+    r = fitz.Rect(
+        bbox.x0 * px_to_pt,
+        bbox.y0 * px_to_pt,
+        bbox.x1 * px_to_pt,
+        bbox.y1 * px_to_pt,
+    )
+    r.normalize()
+    r = r & page_rect
+    if r.is_empty or r.width <= 1 or r.height <= 1:
+        return None
+    return r
+
+
+def _overlay_horizontal_line(page, rect, text: str, font) -> bool:
+    """
+    Invisible single-line overlay sized to the line box, shrunk to fit width.
+    Selection highlight tracks each individual text line precisely.
+    """
+    try:
+        text = text.strip()
+        if not text:
+            return False
+        fs = max(3.0, min(rect.height, 48.0))
+        try:
+            w = font.text_length(text, fontsize=fs)
+            if w > rect.width and w > 0:
+                fs = max(3.0, fs * (rect.width / w))
+        except Exception:
+            pass
+        # Baseline slightly above the box bottom edge.
+        baseline = rect.y1 - rect.height * 0.18
+        tw = fitz.TextWriter(page.rect)
+        tw.append(pos=(rect.x0, baseline), text=text, font=font, fontsize=fs)
+        tw.write_text(page, render_mode=3)   # invisible but selectable
+        return True
+    except Exception as e:
+        logger.debug(f"horizontal line overlay failed: {e}")
+        return False
+
+
+def _overlay_vertical_line(page, rect, text: str, font) -> bool:
+    """
+    Invisible per-character overlay distributed down a vertical column.
+    Each character is placed at equal steps so drag-selection in CJK
+    vertical text lands on the correct individual glyphs.
+    """
+    try:
+        chars = [c for c in text if not c.isspace()]
+        n = len(chars)
+        if n == 0:
+            return False
+        step = rect.height / n
+        fs   = max(3.0, min(rect.width, step, 48.0))
+        tw   = fitz.TextWriter(page.rect)
+        x    = rect.x0
+        y    = rect.y0 + fs
+        for c in chars:
+            if y > page.rect.y1:
+                break
+            tw.append(pos=(x, y), text=c, font=font, fontsize=fs)
+            y += step
+        tw.write_text(page, render_mode=3)
+        return True
+    except Exception as e:
+        logger.debug(f"vertical line overlay failed: {e}")
+        return False
+
+
+def _overlay_invisible_text(page, rect, text: str, font) -> bool:
+    """
+    Block-level fallback: lay text into rect, wrapping to width and scaling
+    font so the lines roughly fill the box height. render_mode=3 = invisible.
+    Used when per-line boxes are unavailable.
+    """
+    try:
+        width  = max(rect.width, 1.0)
+        height = rect.height
+
+        nominal = 12.0
+        nlines  = max(1, len(_wrap_text_fitz(text, font, nominal, width)))
+        line_factor = 1.2
+        target_fs   = height / (nlines * line_factor) if height > 0 else nominal
+        fs = max(3.0, min(target_fs, 48.0))
+
+        lines = _wrap_text_fitz(text, font, fs, width)
+
+        tw = fitz.TextWriter(page.rect)
+        y  = rect.y0 + fs
+        for line in lines:
+            if not line:
+                y += fs * line_factor
+                continue
+            if y > page.rect.y1:
+                break
+            tw.append(pos=(rect.x0, y), text=line, font=font, fontsize=fs)
+            y += fs * line_factor
+
+        tw.write_text(page, render_mode=3)
+        return True
+    except Exception as e:
+        logger.debug(f"block overlay failed: {e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-# BUG FIX: XML control characters that are illegal in XML 1.0.
-# ReportLab's Paragraph parser chokes on these, causing the entire
-# ReportLab rendering path to fail. OCR output can contain stray
-# control characters from misrecognised glyphs or corrupted text.
-# XML 1.0 only allows: #x9, #xA, #xD, and #x20+.
-_CTRL_CHAR_RE = re.compile(
-    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'
-)
+_CTRL_CHAR_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 
 
 def _esc(text: str) -> str:
-    # First strip illegal XML control characters
     text = _CTRL_CHAR_RE.sub('', text)
     return (text
             .replace("&", "&amp;")

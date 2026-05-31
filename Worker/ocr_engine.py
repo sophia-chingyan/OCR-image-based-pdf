@@ -69,6 +69,18 @@ class BBox:
 
 
 @dataclass
+class TextLine:
+    """
+    A single visual line within a text block.
+    For vertical CJK text, each top-to-bottom column is one line.
+    Used by the searchable PDF assembler to place the invisible text
+    overlay at per-line precision rather than block-level.
+    """
+    text: str
+    bbox: BBox
+
+
+@dataclass
 class TextBlock:
     """A single recognized text region on a page."""
     text: str
@@ -77,6 +89,7 @@ class TextBlock:
     font_size_estimate: float   # relative — used for heading detection
     confidence: float           # 0.0 – 1.0
     direction: TextDirection = "horizontal"
+    lines: List[TextLine] = field(default_factory=list)  # per-line boxes (may be empty)
 
 
 @dataclass
