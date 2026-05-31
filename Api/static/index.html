@@ -111,7 +111,7 @@
     .progress-bar-fill.indeterminate{width:40%!important;animation:slide 1.4s infinite}
     @keyframes slide{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
 
-    /* Language / format picker */
+    /* Format / language picker */
     #format-section{margin-top:1.25rem;padding-top:1.1rem;border-top:1px solid var(--border)}
     .format-label{font-size:.7rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem}
     .lang-picker{display:flex;gap:.5rem .9rem;flex-wrap:wrap;margin:.4rem 0 .25rem}
@@ -121,7 +121,7 @@
 
     #progress-actions{margin-top:.25rem}
 
-    /* ── Action buttons (shared with JS-generated markup) ── */
+    /* ── Action buttons ── */
     .action-btn{
       font-family:'DM Sans',sans-serif;font-size:.8rem;font-weight:600;letter-spacing:.01em;
       padding:.4rem .85rem;border:none;border-radius:7px;cursor:pointer;transition:all .15s;color:#fff;
@@ -208,7 +208,7 @@
     <div class="page-header">
       <div>
         <h1>Convert</h1>
-        <div class="subtitle">Image PDF → clean, re-typeset PDF · CJK &amp; vertical text via Gemini</div>
+        <div class="subtitle">Image PDF → clean or searchable PDF · CJK &amp; vertical text via Gemini</div>
       </div>
       <a href="/library" class="btn btn-ghost">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
@@ -244,9 +244,18 @@
       </div>
       <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
 
-      <!-- Format / language picker (shown after upload, hidden once job starts) -->
+      <!-- Format / language picker -->
       <div id="format-section" style="display:none">
-        <div class="format-label">Output format: Clean PDF</div>
+        <div class="format-label">Output format</div>
+        <div class="lang-picker" id="format-picker">
+          <label class="lang-option"><input type="checkbox" class="fmt-checkbox" value="clean" checked> Clean PDF</label>
+          <label class="lang-option"><input type="checkbox" class="fmt-checkbox" value="searchable"> Searchable PDF</label>
+        </div>
+        <div class="lang-hint">
+          <strong>Clean PDF</strong> re-typesets all OCR text into a fresh, properly formatted document.
+          <strong>Searchable PDF</strong> keeps the original scanned pages and overlays an invisible, selectable text layer — looks identical to the scan but text is copyable and searchable.
+          You may select both.
+        </div>
         <div class="format-label" style="margin-top:.9rem">Language priority</div>
         <div class="lang-picker" id="lang-picker">
           <label class="lang-option"><input type="checkbox" value="auto" checked> Automatic Detection</label>
@@ -287,9 +296,6 @@ function showToast(m,d=3000){toast.textContent=m;toast.classList.add('show');set
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
 
-/* ── Handle expired session uniformly across all API calls. Any 401 from
-   the API redirects to '/', which the backend renders as the login page
-   when no valid session exists. */
 let _redirectingToLogin = false;
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -303,16 +309,20 @@ async function api(path, opts) {
 }
 
 /* ── Format helpers ── */
-const FORMAT_LABELS = { clean: 'Clean PDF' };
-function getSelectedFormats(){ return ['clean']; }
+const FORMAT_LABELS = { clean: 'Clean PDF', searchable: 'Searchable PDF' };
+
+function getSelectedFormats(){
+  const f=[...document.querySelectorAll('#format-picker .fmt-checkbox:checked')].map(cb=>cb.value);
+  return f.length?f:['clean'];
+}
 function getSelectedLanguageHints(){
   return [...document.querySelectorAll('#lang-picker input[type="checkbox"]:checked')]
     .map(cb => cb.value)
     .filter(v => v !== 'auto');
 }
 
-/* ── Config (fetched from server to avoid hardcoded limits) ── */
-let MAX_PDF_SIZE_MB = 100; // fallback default
+/* ── Config ── */
+let MAX_PDF_SIZE_MB = 100;
 (async function loadConfig(){
   try{
     const res=await fetch('/api/config');
@@ -376,6 +386,9 @@ function renderPausedActions(id){
 
 async function startJob(id){
   try{
+    // Guard: at least one format must be selected.
+    const checkedFmts=document.querySelectorAll('#format-picker .fmt-checkbox:checked');
+    if(checkedFmts.length===0){showToast('Select at least one output format.');return;}
     const fmts=getSelectedFormats();
     const hints=getSelectedLanguageHints();
     const res=await api(`/api/start/${id}`,{
@@ -398,7 +411,6 @@ async function startJob(id){
 async function pauseJob(id){
   try{const res=await api(`/api/pause/${id}`,{method:'POST'});if(!res.ok)throw new Error('Pause failed.');showToast('Pause requested.')}catch(e){showToast(e.message)}
 }
-
 async function stopJob(id){
   try{const res=await api(`/api/stop/${id}`,{method:'POST'});if(!res.ok)throw new Error('Stop failed.');showToast('Stop requested.')}catch(e){showToast(e.message)}
 }
@@ -423,6 +435,8 @@ function buildDownloadButtons(job){
   let btns=[];
   if(job.clean_pdf_path)
     btns.push(`<a class="download-btn secondary" href="/api/download/${id}/clean" download>↓ Clean PDF</a>`);
+  if(job.searchable_pdf_path)
+    btns.push(`<a class="download-btn" href="/api/download/${id}/searchable" download>↓ Searchable PDF</a>`);
   btns.push(`<button class="action-btn btn-delete" data-action="delete-current" data-job-id="${id}">✕</button>`);
   return btns.join(' ');
 }
@@ -458,10 +472,7 @@ function updateProgressUI(job){
   }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   HISTORY — card-based layout with full detail
-   ══════════════════════════════════════════════════════════════════════════ */
-
+/* ── History ── */
 const STATUS_BADGE = {
   pending:'⏳ Pending', queued:'⏳ Queued', processing:'⚙ Processing',
   paused:'⏸ Paused', stopped:'⏹ Stopped', failed:'✗ Failed', done:'✓ Done'
@@ -473,9 +484,13 @@ function renderHistoryCard(job) {
   const created = fmtDate(job.created_at);
   const status = STATUS_BADGE[job.status] || esc(job.status);
 
-  const dlLink = (job.status === 'done' && job.clean_pdf_path)
-    ? `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Download</a>`
-    : '';
+  let dlLink = '';
+  if (job.status === 'done') {
+    if (job.clean_pdf_path)
+      dlLink += `<a class="dl-link secondary" href="/api/download/${id}/clean" download>↓ Clean</a> `;
+    if (job.searchable_pdf_path)
+      dlLink += `<a class="dl-link" href="/api/download/${id}/searchable" download>↓ Searchable</a> `;
+  }
 
   let actionBtns = '';
   if (job.status === 'pending') {
@@ -525,7 +540,6 @@ async function loadHistory() {
   } catch(_) {}
 }
 
-/* ── Resume polling for any active jobs on page load ── */
 async function resumeActiveJobs() {
   try {
     const res = await api('/api/history');
@@ -552,7 +566,6 @@ async function resumeActiveJobs() {
   } catch(_) {}
 }
 
-/* ── History actions ── */
 async function historyDeleteJob(id) {
   if (!confirm('Delete this job and its files?')) return;
   try {
@@ -567,7 +580,6 @@ async function historyDeleteJob(id) {
   } catch(e) { showToast(e.message); }
 }
 
-/* ── Delegated click handler ── */
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-action]');
   if (!b) return;
@@ -579,7 +591,6 @@ document.addEventListener('click', e => {
   else if (a === 'history-delete') historyDeleteJob(id);
 });
 
-/* ── Auto-refresh history for active jobs ── */
 let historyRefreshInterval = null;
 function startHistoryRefresh() {
   if (historyRefreshInterval) return;

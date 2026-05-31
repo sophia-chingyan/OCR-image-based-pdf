@@ -102,12 +102,13 @@
     .book-name{font-weight:600;font-size:.9rem;color:var(--text);line-height:1.3;word-break:break-word}
     .book-filename{font-size:.78rem;color:var(--text-muted);margin-top:.15rem}
 
-    .badge{display:inline-block;padding:.15rem .55rem;border-radius:4px;font-size:.72rem;font-weight:700;letter-spacing:.04em}
+    .badge{display:inline-block;padding:.15rem .55rem;border-radius:4px;font-size:.72rem;font-weight:700;letter-spacing:.04em;margin-right:.2rem}
     .badge-pdf{background:#fee9df;color:var(--accent)}
+    .badge-search{background:#e7f0ff;color:#2563eb}
     .badge-expired{background:#f3f1ee;color:var(--text-muted)}
 
     .cell-muted{font-size:.85rem;color:var(--text-muted)}
-    .row-actions{display:flex;align-items:center;gap:.4rem;justify-content:flex-end}
+    .row-actions{display:flex;align-items:center;gap:.4rem;justify-content:flex-end;flex-wrap:wrap}
     .btn-ghost[disabled]{opacity:.45;cursor:not-allowed;pointer-events:none}
 
     /* ── Toast ── */
@@ -131,8 +132,8 @@
       .site-header{padding:0 1rem}
       .page-wrap{padding:1.5rem 1rem 3rem}
       .nav-link span.label{display:none}
-      .book-table th:nth-child(3),.book-table td:nth-child(3){display:none}
       .book-table th:nth-child(4),.book-table td:nth-child(4){display:none}
+      .book-table th:nth-child(5),.book-table td:nth-child(5){display:none}
     }
   </style>
 </head>
@@ -170,7 +171,6 @@
       </div>
     </div>
 
-    <!-- Render targets -->
     <div id="loading-state" class="loading-state">Loading your library…</div>
     <div id="empty-state" class="empty-state" style="display:none">
       <div class="empty-icon">📚</div>
@@ -202,7 +202,7 @@
           <tr>
             <th></th>
             <th>Document</th>
-            <th>Format</th>
+            <th>Formats</th>
             <th>Pages</th>
             <th>Converted</th>
             <th>Actions</th>
@@ -231,9 +231,8 @@
     const $ = id => document.getElementById(id);
 
     function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-    function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'})}
+    function fmtDate(ts){if(!ts)return'—';const d=new Date(ts*1000);return d.toLocaleDateString([],{year:'numeric',month:'short',day:'numeric'})}
 
-    /* ── 401 → login redirect (same pattern as the Convert page) ── */
     let _redirectingToLogin = false;
     async function api(path, opts) {
       const res = await fetch(path, opts);
@@ -245,13 +244,11 @@
       return res;
     }
 
-    /* ── Load completed conversions from job history ── */
     async function loadLibrary() {
       try {
         const res = await api('/api/history');
         if (!res.ok) { $('loading-state').textContent = 'Could not load library.'; return; }
         const jobs = await res.json();
-        // Only completed conversions belong in the Library.
         const done = jobs.filter(j => j.status === 'done');
         renderLibrary(done);
       } catch (err) {
@@ -261,40 +258,44 @@
 
     function renderLibrary(jobs) {
       $('loading-state').style.display = 'none';
-
       if (!jobs.length) {
         $('table-wrap').style.display = 'none';
         $('empty-state').style.display = 'block';
         $('book-count').textContent = '';
         return;
       }
-
       $('empty-state').style.display = 'none';
       $('table-wrap').style.display = 'block';
       $('book-count').textContent = jobs.length + ' document' + (jobs.length !== 1 ? 's' : '');
-
       $('book-tbody').innerHTML = jobs.map(rowHTML).join('');
       updateSelectionUI();
     }
 
+    const DL_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
     function rowHTML(job) {
-      const id = esc(job.job_id);
+      const id   = esc(job.job_id);
       const name = esc(job.filename || 'Untitled');
       const stem = esc((job.filename || 'Untitled').replace(/\.pdf$/i, ''));
       const pages = job.page_count ? job.page_count : '—';
-      const date = fmtDate(job.created_at);
-      const available = !!job.clean_pdf_path;
+      const date  = fmtDate(job.created_at);
 
-      const formatBadge = available
-        ? '<span class="badge badge-pdf">CLEAN PDF</span>'
-        : '<span class="badge badge-expired">EXPIRED</span>';
+      const hasClean  = !!job.clean_pdf_path;
+      const hasSearch = !!job.searchable_pdf_path;
+      const anyAvail  = hasClean || hasSearch;
 
-      const downloadBtn = available
-        ? `<a href="/api/download/${id}/clean" class="btn btn-ghost btn-sm" download title="Download">
-             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-             Download
-           </a>`
-        : `<button class="btn btn-ghost btn-sm" disabled title="Output file no longer available">Unavailable</button>`;
+      let formatBadges = '';
+      if (hasClean)  formatBadges += '<span class="badge badge-pdf">CLEAN</span>';
+      if (hasSearch) formatBadges += '<span class="badge badge-search">SEARCHABLE</span>';
+      if (!anyAvail) formatBadges = '<span class="badge badge-expired">EXPIRED</span>';
+
+      let downloadBtns = '';
+      if (hasClean)
+        downloadBtns += `<a href="/api/download/${id}/clean" class="btn btn-ghost btn-sm" download title="Download clean PDF">${DL_ICON} Clean</a>`;
+      if (hasSearch)
+        downloadBtns += `<a href="/api/download/${id}/searchable" class="btn btn-ghost btn-sm" download title="Download searchable PDF">${DL_ICON} Searchable</a>`;
+      if (!anyAvail)
+        downloadBtns = `<button class="btn btn-ghost btn-sm" disabled title="Output files no longer available">Unavailable</button>`;
 
       return `<tr class="book-row" data-job-id="${id}" data-stem="${stem}">
         <td><input type="checkbox" class="row-checkbox" value="${id}"></td>
@@ -307,12 +308,12 @@
             </div>
           </div>
         </td>
-        <td>${formatBadge}</td>
+        <td>${formatBadges}</td>
         <td><span class="cell-muted">${pages}${pages !== '—' ? ' pp' : ''}</span></td>
         <td><span class="cell-muted">${date}</span></td>
         <td>
           <div class="row-actions">
-            ${downloadBtn}
+            ${downloadBtns}
             <button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="confirmDeleteOne('${id}', '${stem}')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M9 6V4h6v2"/></svg>
             </button>
@@ -346,7 +347,6 @@
     document.addEventListener('change', e => {
       if (e.target.classList.contains('row-checkbox')) updateSelectionUI();
     });
-
     selectAll.addEventListener('change', () => {
       document.querySelectorAll('.row-checkbox').forEach(cb => { cb.checked = selectAll.checked; });
       updateSelectionUI();
@@ -373,18 +373,16 @@
       setTimeout(() => toast.remove(), 3500);
     }
 
-    /* ── Delete flows (wired to DELETE /api/delete/{job_id}) ── */
+    /* ── Delete flows ── */
     function confirmDeleteOne(jobId, stem) {
       openModal('Delete this document?', `<strong>${stem}</strong> and its files will be permanently removed.`, () => deleteJobs([jobId]));
     }
-
     function deleteSelected() {
       const ids = getChecked().map(cb => cb.value);
       if (!ids.length) return;
       const noun = ids.length === 1 ? '1 document' : ids.length + ' documents';
       openModal('Delete selected?', `<strong>${noun}</strong> will be permanently removed.`, () => deleteJobs(ids));
     }
-
     function confirmDeleteAll() {
       const ids = [...document.querySelectorAll('.book-row')].map(r => r.dataset.jobId);
       if (!ids.length) return;
@@ -425,7 +423,6 @@
       }
     }
 
-    /* ── Init ── */
     loadLibrary();
   </script>
 </body>
