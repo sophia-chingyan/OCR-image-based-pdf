@@ -40,21 +40,13 @@ ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"].strip().lower()
 BASE_URL = os.environ.get("APP_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8080")
 BASE_URL = BASE_URL.rstrip("/")
 
-# FIX: Only set Secure cookie flag when serving over HTTPS.
-# With https_only=True on localhost (HTTP), the browser refuses to send
-# the session cookie back, breaking authentication entirely.
 _HTTPS_ONLY = BASE_URL.startswith("https://")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
 
-# Max retries for WATCH/MULTI/EXEC transactions on concurrent writes
 MAX_WATCH_RETRIES = 5
-WATCH_RETRY_DELAY = 0.01  # seconds
+WATCH_RETRY_DELAY = 0.01
 
-# BUG FIX: Session keys previously had no TTL, so every sign-in leaked a
-# session:* key into Redis forever (especially when REDIS_URL points at an
-# external Redis). Bound sessions to 30 days; this is well past the cookie's
-# practical lifetime but stops the unbounded growth.
 SESSION_TTL_SECONDS = 30 * 24 * 3600
 
 
@@ -74,11 +66,6 @@ app.add_middleware(
 )
 
 _static_dir = Path(__file__).parent / "static"
-# BUG FIX (#6): Do NOT mount /static publicly. index.html contains the full
-# authenticated UI. Serving it via StaticFiles bypasses the auth check in the
-# "/" route. The only HTML files are served through the authenticated "/" route.
-# if _static_dir.is_dir():
-#     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 oauth = OAuth()
 oauth.register(
@@ -90,9 +77,8 @@ oauth.register(
 )
 
 
-# ── OCR cache cleanup helper (async) ─────────────────────────────────────────
+# ── OCR cache cleanup helper ──────────────────────────────────────────────────
 async def _clear_ocr_cache(r, job_id: str) -> int:
-    """Delete all `ocr:{job_id}:*` keys. Returns count deleted."""
     deleted = 0
     pattern = f"ocr:{job_id}:*"
     try:
@@ -107,14 +93,7 @@ async def _clear_ocr_cache(r, job_id: str) -> int:
     return deleted
 
 
-# ── tmp-work cleanup helper ──────────────────────────────────────────────────
 def _clear_tmp_work(job_id: str) -> None:
-    """
-    Remove the worker's per-job scratch directory. Normally the worker
-    cleans this up in its `finally` block, but if the worker was killed
-    mid-run (container restart) or the user is deleting a paused/stopped
-    job, the directory can persist. This is a best-effort cleanup.
-    """
     try:
         tmp_dir = TMPWORK_DIR / job_id
         if tmp_dir.exists():
@@ -123,19 +102,10 @@ def _clear_tmp_work(job_id: str) -> None:
         pass
 
 
-# ── Job-record / file cleanup for jobs that fall off the history list ────────
 async def _purge_job_record(r, job_id: str) -> None:
     """
-    Delete a job's redis record, output file, source PDF, OCR cache and
-    scratch directory. Best-effort; used when a job is pushed out of the
-    bounded history list so we don't leak resources indefinitely.
-
-    FIX #6: Only purge jobs in terminal states (done, failed, stopped).
-    If the job is still queued/processing/paused, leave it alone — the
-    worker or user may still need it.
-
-    Caller is responsible for the actual ltrim — this just garbage-collects
-    a single id.
+    Delete a job's redis record, output files, source PDF, OCR cache and
+    scratch directory. Only purges terminal-state jobs.
     """
     if not job_id:
         return
@@ -147,11 +117,10 @@ async def _purge_job_record(r, job_id: str) -> None:
     if raw:
         try:
             job = json.loads(raw)
-            # Don't purge jobs that are still active
             status = job.get("status", "")
             if status in ("queued", "processing", "paused", "pending"):
                 return
-            for key in ("pdf_path", "clean_pdf_path"):
+            for key in ("pdf_path", "clean_pdf_path", "searchable_pdf_path"):
                 try:
                     p = Path(job.get(key, ""))
                     if p.exists():
@@ -172,9 +141,6 @@ async def create_session(request: Request, email: str) -> None:
     session_token = str(uuid.uuid4())
     r = await get_async_redis()
     try:
-        # BUG FIX: bound session TTL so old sessions don't accumulate
-        # forever in Redis. SET with an EX argument is supported by both
-        # redis-py and fakeredis.
         await r.set(f"session:{session_token}", email, ex=SESSION_TTL_SECONDS)
     finally:
         await r.aclose()
@@ -212,7 +178,16 @@ async def auth_callback(request: Request):
     userinfo = token.get("userinfo") or {}
     email = (userinfo.get("email") or "").strip().lower()
     if email != ALLOWED_EMAIL:
-        return HTMLResponse("<h1>403 Access Denied</h1>", status_code=403)
+        error_path = _static_dir / "login_error.html"
+        try:
+            async with aiofiles.open(error_path) as f:
+                html = (await f.read()).replace(
+                    "{{ error }}",
+                    "This Google account is not authorized to use this app.",
+                )
+            return HTMLResponse(html, status_code=403)
+        except Exception:
+            return HTMLResponse("<h1>403 Access Denied</h1>", status_code=403)
     await create_session(request, email)
     return RedirectResponse(url="/", status_code=302)
 
@@ -238,6 +213,15 @@ async def index(request: Request):
     async with aiofiles.open(login_path) as f:
         return HTMLResponse(await f.read())
 
+@app.get("/library", response_class=HTMLResponse)
+async def library(request: Request):
+    user = await get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/", status_code=302)
+    library_path = _static_dir / "library.html"
+    async with aiofiles.open(library_path) as f:
+        return HTMLResponse(await f.read())
+
 # ── Upload ────────────────────────────────────────────────────────────────────
 @app.post("/api/upload")
 async def upload_pdf(
@@ -245,25 +229,10 @@ async def upload_pdf(
     file: UploadFile = File(...),
     user: str = Depends(require_auth),
 ):
-    # BUG FIX: previously this code called `file.filename.lower()` directly,
-    # which raises AttributeError if the multipart part has no filename
-    # (which is legal per RFC 7578 and is what some HTTP clients send).
-    # Defensively coerce to a string.
     fname = (file.filename or "").strip()
     if not fname or not fname.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are accepted.")
 
-    # BUG FIX (DoS): the previous implementation called `await file.read()`
-    # which buffers the ENTIRE request body in memory before checking the
-    # size limit. A multi-GB upload (malicious or accidental) would OOM
-    # the container before the 413 was ever raised.
-    #
-    # Fix: enforce the limit in three layers:
-    #   1. Reject early if the client sent a Content-Length that exceeds
-    #      the limit — no body bytes read at all.
-    #   2. Stream the body to disk in 1 MiB chunks, accumulating size.
-    #   3. Abort and clean up the moment the running total crosses the
-    #      limit, well before any real OOM risk.
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -273,7 +242,7 @@ async def upload_pdf(
     job_id   = str(uuid.uuid4())
     pdf_path = UPLOAD_DIR / f"{job_id}.pdf"
     total    = 0
-    CHUNK    = 1024 * 1024  # 1 MiB
+    CHUNK    = 1024 * 1024
 
     try:
         async with aiofiles.open(pdf_path, "wb") as out:
@@ -289,7 +258,6 @@ async def upload_pdf(
                     )
                 await out.write(chunk)
     except HTTPException:
-        # Best-effort cleanup of the partially written file.
         try:
             pdf_path.unlink(missing_ok=True)
         except OSError:
@@ -302,8 +270,6 @@ async def upload_pdf(
             pass
         raise
 
-    # Reject empty uploads explicitly so we don't enqueue a job for a 0-byte
-    # PDF (PyMuPDF would error later and confuse the user).
     if total == 0:
         try:
             pdf_path.unlink(missing_ok=True)
@@ -323,30 +289,26 @@ async def upload_pdf(
         pass
 
     job = {
-        "job_id":          job_id,
-        "filename":        fname,
-        "status":          "pending",
-        "progress":        0,
-        "message":         "Waiting to start",
-        "created_at":      int(time.time()),
-        "pdf_path":        str(pdf_path),
-        "clean_pdf_path":  "",
-        "error":           "",
-        "stop_requested":  False,
-        "pause_requested": False,
-        "page_count":      page_count,
-        "output_formats":  formats,
+        "job_id":              job_id,
+        "filename":            fname,
+        "status":              "pending",
+        "progress":            0,
+        "message":             "Waiting to start",
+        "created_at":          int(time.time()),
+        "pdf_path":            str(pdf_path),
+        "clean_pdf_path":      "",
+        "searchable_pdf_path": "",
+        "error":               "",
+        "stop_requested":      False,
+        "pause_requested":     False,
+        "page_count":          page_count,
+        "output_formats":      formats,
     }
 
     r = await get_async_redis()
     try:
         await r.set(f"job:{job_id}", json.dumps(job))
         await r.lpush("job_history", job_id)
-        # BUG FIX: previously we just ltrim'd the history list, leaving the
-        # job:* records, output files, OCR cache and source PDFs of all
-        # jobs that fell off the end of the list as orphans in Redis / on
-        # disk. Read the IDs *beyond* the retention window first, then
-        # purge them properly.
         try:
             orphan_ids = await r.lrange("job_history", JOB_HISTORY, -1)
         except Exception:
@@ -380,15 +342,12 @@ async def job_history(user: str = Depends(require_auth)):
     try:
         ids = await r.lrange("job_history", 0, JOB_HISTORY - 1)
         jobs = []
-        # BUG FIX: previously this issued one GET per id, which is N
-        # round-trips against external Redis. MGET batches it into one.
         if ids:
             try:
                 raws = await r.mget([f"job:{jid}" for jid in ids])
             except Exception:
                 raws = None
             if raws is None:
-                # Fall back to per-id gets if mget unavailable.
                 raws = []
                 for jid in ids:
                     try:
@@ -405,7 +364,7 @@ async def job_history(user: str = Depends(require_auth)):
         await r.aclose()
     return JSONResponse(jobs)
 
-# ── Download: Clean PDF ──────────────────────────────────────────────────────
+# ── Download: Clean PDF ───────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}/clean")
 async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
@@ -420,13 +379,6 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
         raise HTTPException(400, "Job not complete.")
     p = Path(job.get("clean_pdf_path", ""))
     if not p.exists():
-        # BUG FIX: the output file may have been pruned by the worker's
-        # output-retention cleanup (default 7 days) even though the job
-        # record still says "done". Previously this returned 404 with the
-        # generic "Clean PDF not found" message, which is confusing — the
-        # UI's download link looked broken. Clear the stale path on the
-        # job record so the UI stops showing a download button, and
-        # return 410 Gone with a clear explanation.
         try:
             job["clean_pdf_path"] = ""
             r2 = await get_async_redis()
@@ -444,6 +396,38 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
     return FileResponse(str(p), media_type="application/pdf",
                         filename=f"{Path(job['filename']).stem}_clean.pdf")
 
+# ── Download: Searchable PDF ──────────────────────────────────────────────────
+@app.get("/api/download/{job_id}/searchable")
+async def download_searchable_pdf(job_id: str, user: str = Depends(require_auth)):
+    r = await get_async_redis()
+    try:
+        raw = await r.get(f"job:{job_id}")
+    finally:
+        await r.aclose()
+    if not raw:
+        raise HTTPException(404, "Job not found.")
+    job = json.loads(raw)
+    if job["status"] != "done":
+        raise HTTPException(400, "Job not complete.")
+    p = Path(job.get("searchable_pdf_path", ""))
+    if not p.exists():
+        try:
+            job["searchable_pdf_path"] = ""
+            r2 = await get_async_redis()
+            try:
+                await r2.set(f"job:{job_id}", json.dumps(job))
+            finally:
+                await r2.aclose()
+        except Exception:
+            pass
+        raise HTTPException(
+            410,
+            "Searchable PDF is no longer available (output retention window "
+            "expired). Please re-upload and reconvert."
+        )
+    return FileResponse(str(p), media_type="application/pdf",
+                        filename=f"{Path(job['filename']).stem}_searchable.pdf")
+
 # ── Start / Pause / Stop / Delete ────────────────────────────────────────────
 @app.post("/api/start/{job_id}")
 async def start_job(job_id: str, request: Request, user: str = Depends(require_auth)):
@@ -452,17 +436,24 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         body = await request.json()
     except Exception:
         pass
-    # BUG FIX: tolerate body that isn't a dict (e.g. a bare string or null
-    # from a misbehaving client) — body.get() would raise AttributeError.
     if not isinstance(body, dict):
         body = {}
+
     language_hints = body.get("language_hints")
     if not isinstance(language_hints, list):
         language_hints = []
 
+    requested_formats = body.get("output_formats")
+    valid_formats = {"clean", "searchable"}
+    if isinstance(requested_formats, list):
+        formats = [f for f in requested_formats if f in valid_formats]
+    else:
+        formats = []
+    if not formats:
+        formats = ["clean"]
+
     r = await get_async_redis()
     try:
-        # FIX #10: Retry on WatchError for atomic read-modify-write.
         for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
@@ -482,18 +473,21 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
                             "(retention window expired). Please re-upload."
                         )
 
-                    old_clean = job.get("clean_pdf_path", "")
-                    if old_clean:
-                        try:
-                            p = Path(old_clean)
-                            if p.exists():
-                                p.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                    # Clear any previous output files.
+                    for old_key in ("clean_pdf_path", "searchable_pdf_path"):
+                        old = job.get(old_key, "")
+                        if old:
+                            try:
+                                p = Path(old)
+                                if p.exists():
+                                    p.unlink(missing_ok=True)
+                            except OSError:
+                                pass
 
-                    job["output_formats"] = ["clean"]
-                    job["clean_pdf_path"] = ""
-                    job["language_hints"]  = language_hints
+                    job["output_formats"]      = formats
+                    job["clean_pdf_path"]      = ""
+                    job["searchable_pdf_path"] = ""
+                    job["language_hints"]      = language_hints
                     job.update(status="queued", message="Queued", progress=0, error="",
                                stop_requested=False, pause_requested=False)
 
@@ -501,7 +495,7 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
                     pipe.set(f"job:{job_id}", json.dumps(job))
                     pipe.lpush("job_queue", job_id)
                     await pipe.execute()
-                break  # success
+                break
             except HTTPException:
                 raise
             except Exception:
@@ -520,8 +514,6 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 async def pause_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block
-        # so it's transactional with the status update.
         for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
@@ -545,11 +537,10 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
 
                     pipe.multi()
                     pipe.set(f"job:{job_id}", json.dumps(job))
-                    # lrem inside MULTI so it's atomic with the status change
                     if s == "queued":
                         pipe.lrem("job_queue", 0, job_id)
                     await pipe.execute()
-                break  # success
+                break
             except HTTPException:
                 raise
             except Exception:
@@ -564,7 +555,6 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
 async def stop_job(job_id: str, user: str = Depends(require_auth)):
     r = await get_async_redis()
     try:
-        # FIX #10/#11: Retry on WatchError; move lrem inside MULTI block.
         for _attempt in range(MAX_WATCH_RETRIES):
             try:
                 async with r.pipeline() as pipe:
@@ -586,11 +576,10 @@ async def stop_job(job_id: str, user: str = Depends(require_auth)):
 
                     pipe.multi()
                     pipe.set(f"job:{job_id}", json.dumps(job))
-                    # lrem inside MULTI so it's atomic with the status change
                     if s == "queued":
                         pipe.lrem("job_queue", 0, job_id)
                     await pipe.execute()
-                break  # success
+                break
             except HTTPException:
                 raise
             except Exception:
@@ -613,16 +602,13 @@ async def delete_job(job_id: str, user: str = Depends(require_auth)):
             raise HTTPException(400, "Stop it first.")
         if job["status"] == "queued":
             await r.lrem("job_queue", 0, job_id)
-        for key in ("pdf_path", "clean_pdf_path"):
+        for key in ("pdf_path", "clean_pdf_path", "searchable_pdf_path"):
             try:
                 p = Path(job.get(key, ""))
                 if p.exists():
                     p.unlink(missing_ok=True)
             except OSError:
                 pass
-        # BUG FIX: also remove any per-job scratch directory left behind
-        # by a crashed/restarted worker so disk usage doesn't grow over
-        # time. Safe at this point because status != "processing".
         _clear_tmp_work(job_id)
         await _clear_ocr_cache(r, job_id)
         await r.delete(f"job:{job_id}")
@@ -641,7 +627,6 @@ async def health():
         redis_ok = False
     finally:
         await r.aclose()
-    # BUG FIX (#4): report worker health so a dead worker is detectable.
     from Worker.worker import get_worker_health
     worker_ok, worker_err = get_worker_health()
     return {
@@ -653,10 +638,6 @@ async def health():
 
 @app.get("/api/config")
 async def get_config():
-    """
-    Return client-relevant configuration so the frontend doesn't
-    hardcode limits that may drift from the server config.
-    """
     return JSONResponse({
         "max_pdf_size_mb": CFG["pipeline"]["max_pdf_size_mb"],
     })
