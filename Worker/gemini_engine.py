@@ -310,11 +310,6 @@ class GeminiOCREngine(OCREngine):
             x0, y0, x1, y1 = bbox_raw
             bbox = BBox(x0, y0, x1, y1)
             lang = _detect_lang_from_text(text)
-            line_count = max(1, text.count('\n') + 1)
-            if direction == "vertical":
-                estimated_font_size = bbox.width / line_count
-            else:
-                estimated_font_size = bbox.height / line_count
 
             # Build per-line TextLine objects for tight searchable-PDF overlay.
             tb_lines: List[TextLine] = []
@@ -326,6 +321,18 @@ class GeminiOCREngine(OCREngine):
                     continue
                 lx0, ly0, lx1, ly1 = _coerce_bbox(ln.get("bbox"))
                 tb_lines.append(TextLine(text=lt, bbox=BBox(lx0, ly0, lx1, ly1)))
+
+            # Derive line_count from per-line boxes when available; fall back
+            # to newline counting only if Gemini returned no lines array.
+            if tb_lines:
+                line_count = len(tb_lines)
+            else:
+                line_count = max(1, text.count('\n') + 1)
+
+            if direction == "vertical":
+                estimated_font_size = bbox.width / line_count
+            else:
+                estimated_font_size = bbox.height / line_count
 
             blocks.append(TextBlock(
                 text=text,

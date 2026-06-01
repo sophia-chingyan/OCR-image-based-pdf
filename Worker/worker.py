@@ -189,7 +189,7 @@ def run_pipeline(r, job: dict, engine) -> None:
             return
 
         update_job(r, job_id, status="processing", message="Ingesting PDF…", progress=2)
-        ingested = ingest_pdf(pdf_path)
+        ingested = ingest_pdf(pdf_path, original_filename=job.get("filename", ""))
         total_pages = ingested.meta.total_pages
         structured_pages = []
         image_id_counter = [0]
@@ -287,8 +287,16 @@ def run_pipeline(r, job: dict, engine) -> None:
             removed = _clear_ocr_cache(r, job_id)
             if removed:
                 logger.info(f"Job {job_id}: cleared {removed} cached OCR pages")
-            done_fields = {"status": "done", "message": "Complete", "progress": 100}
+            done_fields = {"status": "done", "progress": 100}
             done_fields.update(produced)
+            if assembly_errors:
+                # Partial success: at least one format produced, but another failed.
+                err_detail = "; ".join(assembly_errors)
+                done_fields["message"] = f"Partial success (errors: {err_detail})"
+                done_fields["error"] = err_detail
+                logger.warning(f"Job {job_id} partial success: {err_detail}")
+            else:
+                done_fields["message"] = "Complete"
             update_job(r, job_id, **done_fields)
             logger.info(f"Job {job_id} done: {produced}")
         else:

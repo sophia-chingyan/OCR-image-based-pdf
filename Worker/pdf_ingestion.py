@@ -57,17 +57,28 @@ class IngestedPDF:
     doc: fitz.Document          # keep open for rasterization
 
 
-def ingest_pdf(pdf_path: Path) -> IngestedPDF:
+def ingest_pdf(pdf_path: Path, original_filename: str = "") -> IngestedPDF:
     """
     Open PDF and extract all structural information.
     The returned IngestedPDF.doc must be closed by the caller when done.
+
+    Args:
+        pdf_path: Path to the PDF file on disk.
+        original_filename: The user-provided upload filename. Used as the
+            document title when the PDF has no /Title metadata (common for
+            scanned image PDFs). Falls back to pdf_path.stem if not provided.
     """
     logger.info(f"Ingesting PDF: {pdf_path}")
     doc = fitz.open(str(pdf_path))
 
     raw_meta = doc.metadata or {}
+    # Prefer PDF metadata title; fall back to original upload filename
+    # (without extension) rather than the on-disk UUID stem.
+    fallback_title = (
+        Path(original_filename).stem if original_filename else pdf_path.stem
+    )
     meta = PDFMeta(
-        title=raw_meta.get("title") or pdf_path.stem,
+        title=raw_meta.get("title") or fallback_title,
         author=raw_meta.get("author") or "",
         total_pages=len(doc),
     )
