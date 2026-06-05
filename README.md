@@ -54,13 +54,12 @@ The API and Worker run as a **single process** — the worker is a background da
 4. Click **Create API key → Create API key in new project**
 5. Copy the key — it looks like `AIzaSy...` (~39 characters)
 
-The free tier for `gemini-2.5-flash-lite` (the default model shipped in `config.yaml`) gives you:
-- **15 requests per minute**
-- **1,000 requests per day**
+The `config.yaml` ships with **paid-plan** rate limits (`rpm_limit: 2000`, `rpd_limit: 10000`).
+If you are on the **free tier**, lower these values to stay within quota:
+- Free tier for `gemini-2.5-flash-lite`: **15 RPM**, **1,000 RPD**
+- Free tier for `gemini-2.5-flash`: **10 RPM**, **250 RPD**
 
 The quota resets at midnight Pacific Time. Each PDF page = 1 request.
-
-If you prefer higher accuracy at the cost of lower quota, switch `model_name` in `config.yaml` to `gemini-2.5-flash` (10 RPM, 250 RPD).
 
 ---
 
@@ -130,16 +129,16 @@ On Zeabur, push the repo to GitHub, create a new project, connect the repo, and 
 ocr:
   engine: gemini
   model_name: "gemini-2.5-flash-lite"   # default; change to gemini-2.5-flash for higher accuracy
-  rpm_limit: 15                          # match your Gemini tier
-  rpd_limit: 1000
-  max_retries: 3
-  request_timeout_s: 120
+  rpm_limit: 2000                        # paid plan; use 15 for free tier
+  rpd_limit: 10000                       # paid plan; use 1000 for free tier
+  max_retries: 5
+  request_timeout_s: 180
   confidence_threshold: 0.7
-  dpi: 400                               # rasterization DPI
+  dpi: 300                               # rasterization DPI (300 balances quality vs memory)
 
 pipeline:
   max_pdf_size_mb: 100
-  page_batch_size: 5
+  page_batch_size: 10
   upload_retention_hours: 24
   output_retention_days: 7
   tmp_cleanup_on_complete: true
@@ -150,13 +149,23 @@ server:
   job_history_limit: 10
 ```
 
-### Switching to `gemini-2.5-flash` (higher accuracy, lower daily quota)
+### Free tier overrides
+
+If you are on the free Gemini tier, update `config.yaml`:
+
+```yaml
+ocr:
+  rpm_limit: 15
+  rpd_limit: 1000
+```
+
+### Switching to `gemini-2.5-flash` (higher accuracy)
 
 ```yaml
 ocr:
   model_name: gemini-2.5-flash
-  rpm_limit: 10
-  rpd_limit: 250
+  rpm_limit: 2000    # paid plan; use 10 for free tier
+  rpd_limit: 10000   # paid plan; use 250 for free tier
 ```
 
 Then `docker compose restart app` to apply.
@@ -169,8 +178,8 @@ Then `docker compose restart app` to apply.
 |---|---|---|
 | OS + existing services | ~1.2 GB | ~1.2 GB |
 | FastAPI + in-process store | ~200 MB | ~200 MB |
-| Worker thread (Gemini client) | ~150 MB | ~600 MB (during page rasterization) |
-| **Total** | **~1.55 GB** | **~2.0 GB** |
+| Worker thread (Gemini client) | ~150 MB | ~400 MB (during page rasterization at 300 DPI) |
+| **Total** | **~1.55 GB** | **~1.8 GB** |
 
 Easily fits on the **$3/mo (4 GB)** Zeabur plan now that PaddleOCR/Surya are gone.
 

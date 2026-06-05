@@ -243,8 +243,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                               dpi=DPI)
             structured_pages.append(sp)
             engine.reset_page_cache()
-            del page_img
-            if (page_num + 1) % BATCH_SIZE == 0:
+            del page_img, text_blocks, layout_blocks
+            # For large PDFs, collect every page to avoid OOM; otherwise per batch
+            if total_pages > 50 or (page_num + 1) % BATCH_SIZE == 0:
                 gc.collect()
 
         toc = build_toc(structured_pages)
