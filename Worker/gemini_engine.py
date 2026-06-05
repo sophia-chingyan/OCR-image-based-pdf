@@ -258,7 +258,7 @@ class GeminiOCREngine(OCREngine):
 
     def __init__(self, config: dict):
         self.config        = config
-        self.model_name    = config.get("model_name", "gemini-2.5-flash")
+        self.model_name    = config.get("model_name", "gemini-2.5-flash-lite")
         self.rpm_limit     = int(config.get("rpm_limit", 10))
         self.rpd_limit     = int(config.get("rpd_limit", 250))
         self.api_key       = os.environ.get("GEMINI_API_KEY", "").strip()
