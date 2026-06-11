@@ -267,7 +267,7 @@ def run_pipeline(r, job: dict, engine) -> None:
             update_job(r, job_id, message="Building clean PDF…", progress=87)
             try:
                 p = OUTPUT_DIR / f"{job_id}_clean.pdf"
-                assemble_clean_pdf(structure, p)
+                assemble_clean_pdf(structure, p, source_pdf_path=pdf_path)
                 produced["clean_pdf_path"] = str(p)
             except Exception as e:
                 logger.error(f"Clean PDF assembly failed for {job_id}: {e}\n{traceback.format_exc()}")
