@@ -5,6 +5,8 @@ Two output modes:
 
 Clean PDF (方案 A) — assemble_clean_pdf()
    Re-renders OCR text into a cleanly typeset PDF using ReportLab.
+   Layout: for each source page, emit (1) a full-page image of the original
+   scan at 300 DPI, followed by (2) a text-only OCR page (no images).
 
 Searchable PDF (方案 B) — assemble_searchable_pdf()
    Keeps the original scanned pages pixel-for-pixel, and overlays an
@@ -26,13 +28,16 @@ import re
 import shutil
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 
 from structure_analysis import DocumentStructure, StructuredPage
 
 logger = logging.getLogger(__name__)
+
+# DPI settings for clean PDF scan-page embedding
+_SCAN_DPI = 300   # original scan pages rasterised at this DPI
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,26 +78,50 @@ def _register_best_font(pdfmetrics, UnicodeCIDFont, language: str = "ch_tra") ->
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared helper: rasterise one source page to JPEG bytes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rasterise_source_page_jpeg(src_doc: fitz.Document, page_num: int, dpi: int) -> Optional[bytes]:
+    """
+    Rasterise page_num of src_doc at dpi and return JPEG bytes.
+    Returns None on any error so callers can skip gracefully.
+    """
+    try:
+        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        pix = src_doc[page_num].get_pixmap(matrix=mat, alpha=False)
+        return pix.tobytes("jpeg")
+    except Exception as e:
+        logger.warning(f"Could not rasterise source page {page_num} at {dpi} DPI: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 方案 A: Clean PDF — reflowed text with proper typography
 # ─────────────────────────────────────────────────────────────────────────────
 
 def assemble_clean_pdf(
     structure: DocumentStructure,
     output_path: Path,
+    source_pdf_path: Optional[Path] = None,
 ) -> None:
     """
     Re-render OCR text into a cleanly typeset PDF.
+
+    For each source page the output contains two consecutive pages:
+      1. The original scan rasterised at 300 DPI (full-frame image).
+      2. A text-only OCR page with typeset paragraphs/headings (no images).
+
     Tries ReportLab first; falls back to PyMuPDF on any failure.
     """
     logger.info(f"Assembling clean PDF: {output_path}")
     try:
-        _assemble_clean_pdf_reportlab(structure, output_path)
+        _assemble_clean_pdf_reportlab(structure, output_path, source_pdf_path)
         logger.info(f"Clean PDF written (ReportLab): {output_path} "
                      f"({output_path.stat().st_size/1024:.1f} KB)")
     except Exception as e:
         logger.warning(f"ReportLab build failed ({e}), falling back to PyMuPDF renderer")
         try:
-            _assemble_clean_pdf_pymupdf(structure, output_path)
+            _assemble_clean_pdf_pymupdf(structure, output_path, source_pdf_path)
             logger.info(f"Clean PDF written (PyMuPDF fallback): {output_path} "
                          f"({output_path.stat().st_size/1024:.1f} KB)")
         except Exception as e2:
@@ -104,6 +133,7 @@ def assemble_clean_pdf(
 def _assemble_clean_pdf_reportlab(
     structure: DocumentStructure,
     output_path: Path,
+    source_pdf_path: Optional[Path],
 ) -> None:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -138,100 +168,127 @@ def _assemble_clean_pdf_reportlab(
     s_auth  = _style("A", fontSize=12, leading=18, alignment=TA_CENTER)
     hs = {1: s_h1, 2: s_h2, 3: s_h3}
 
-    content_paragraphs: list = []
+    A4_W, A4_H = A4  # 595.28 pt × 841.89 pt
+    SIDE    = 25 * mm
+    TOP     = 20 * mm
+    # Frame dimensions — scan images are sized to fill this area
+    frame_w = A4_W - 2 * SIDE
+    frame_h = A4_H - 2 * TOP
 
-    for page in structure.pages:
-        page_items: list = []
+    # Open source PDF for scan page rasterisation (optional)
+    src_doc: Optional[fitz.Document] = None
+    if source_pdf_path is not None:
+        try:
+            src_doc = fitz.open(str(source_pdf_path))
+        except Exception as e:
+            logger.warning(f"Could not open source PDF for scan embedding: {e}")
 
-        for img in page.images:
-            if img.image_bytes:
+    try:
+        story: list = []
+
+        # ── Title page ───────────────────────────────────────────────────────
+        if structure.title:
+            story.append(Spacer(1, 40 * mm))
+            story.append(Paragraph(_esc(structure.title), s_title))
+            if structure.author:
+                story.append(Spacer(1, 5 * mm))
+                story.append(Paragraph(_esc(structure.author), s_auth))
+
+        has_any_page = False
+
+        for page in structure.pages:
+            pno = page.page_number
+
+            # ── 1. Original scan page ────────────────────────────────────────
+            if src_doc is not None and 0 <= pno < src_doc.page_count:
+                scan_jpeg = _rasterise_source_page_jpeg(src_doc, pno, _SCAN_DPI)
+                if scan_jpeg is not None:
+                    if story:
+                        story.append(PageBreak())
+                    story.append(RLImage(io.BytesIO(scan_jpeg),
+                                         width=frame_w, height=frame_h,
+                                         kind="proportional"))
+                    has_any_page = True
+
+            # ── 2. OCR text-only page ────────────────────────────────────────
+            text_items: list = []
+            for el in page.elements:
+                t = el.text.strip()
+                if not t:
+                    continue
+                safe = _esc(t)
                 try:
-                    page_items.append(
-                        RLImage(io.BytesIO(img.image_bytes),
-                                width=150 * mm, height=200 * mm, kind="proportional")
-                    )
-                    page_items.append(Spacer(1, 3 * mm))
+                    if el.element_type == "heading":
+                        if el.href:
+                            safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
+                        text_items.append(Paragraph(safe, hs.get(min(el.level, 3), s_h3)))
+                    elif el.element_type == "paragraph":
+                        if el.href:
+                            safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
+                        text_items.append(Paragraph(safe, s_body))
+                    elif el.element_type == "list-item":
+                        bullet_safe = f"\u2022 {safe}"
+                        if el.href:
+                            bullet_safe = f'<a href="{_esc(el.href)}" color="blue">{bullet_safe}</a>'
+                        text_items.append(Paragraph(bullet_safe, s_li))
+                    elif el.element_type == "footnote":
+                        text_items.append(Paragraph(safe, s_fn))
+                    elif el.element_type == "page-number":
+                        text_items.append(Paragraph(safe, s_pn))
+                    elif el.element_type == "caption":
+                        text_items.append(Paragraph(safe, s_cap))
+                    else:
+                        text_items.append(Paragraph(safe, s_body))
                 except Exception as e:
-                    logger.warning(f"Could not embed image in clean PDF: {e}")
+                    logger.warning(f"Skipping element: {e} — text: {t[:50]!r}")
 
-        for el in page.elements:
-            t = el.text.strip()
-            if not t:
-                continue
-            safe = _esc(t)
-            try:
-                if el.element_type == "heading":
-                    if el.href:
-                        safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
-                    page_items.append(Paragraph(safe, hs.get(min(el.level, 3), s_h3)))
-                elif el.element_type == "paragraph":
-                    if el.href:
-                        safe = f'<a href="{_esc(el.href)}" color="blue">{safe}</a>'
-                    page_items.append(Paragraph(safe, s_body))
-                elif el.element_type == "list-item":
-                    bullet_safe = f"\u2022 {safe}"
-                    if el.href:
-                        bullet_safe = f'<a href="{_esc(el.href)}" color="blue">{bullet_safe}</a>'
-                    page_items.append(Paragraph(bullet_safe, s_li))
-                elif el.element_type == "footnote":
-                    page_items.append(Paragraph(safe, s_fn))
-                elif el.element_type == "page-number":
-                    page_items.append(Paragraph(safe, s_pn))
-                elif el.element_type == "caption":
-                    page_items.append(Paragraph(safe, s_cap))
-                else:
-                    page_items.append(Paragraph(safe, s_body))
-            except Exception as e:
-                logger.warning(f"Skipping element: {e} — text: {t[:50]!r}")
-
-        if page_items:
-            content_paragraphs.append(page_items)
-
-    story: list = []
-
-    if structure.title:
-        story.append(Spacer(1, 40 * mm))
-        story.append(Paragraph(_esc(structure.title), s_title))
-        if structure.author:
-            story.append(Spacer(1, 5 * mm))
-            story.append(Paragraph(_esc(structure.author), s_auth))
-
-    if content_paragraphs:
-        if story:
-            story.append(PageBreak())
-        for i, page_items in enumerate(content_paragraphs):
-            story.extend(page_items)
-            if i < len(content_paragraphs) - 1:
+            if text_items:
                 story.append(PageBreak())
-    else:
-        if story:
+                story.extend(text_items)
+                has_any_page = True
+
+        # ── Fallback: nothing produced ───────────────────────────────────────
+        if not has_any_page:
+            if story:
+                story.append(Spacer(1, 10 * mm))
+            story.append(Paragraph(
+                "[ No body text was extracted from this PDF ]", s_body
+            ))
+
+        if not story:
+            story.append(Paragraph(_esc(structure.title or "Untitled"), s_title))
             story.append(Spacer(1, 10 * mm))
-        story.append(Paragraph(
-            "[ No body text was extracted from this PDF ]", s_body
-        ))
+            story.append(Paragraph(
+                "[ No text content could be extracted from this PDF ]", s_body
+            ))
 
-    if not story:
-        story.append(Paragraph(_esc(structure.title or "Untitled"), s_title))
-        story.append(Spacer(1, 10 * mm))
-        story.append(Paragraph(
-            "[ No text content could be extracted from this PDF ]", s_body
-        ))
+        doc = SimpleDocTemplate(
+            str(output_path),
+            pagesize=A4,
+            leftMargin=SIDE, rightMargin=SIDE,
+            topMargin=TOP,   bottomMargin=TOP,
+            title=structure.title or "Untitled",
+            author=structure.author or "",
+        )
+        doc.build(story)
 
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=A4,
-        leftMargin=25 * mm, rightMargin=25 * mm,
-        topMargin=20 * mm, bottomMargin=20 * mm,
-        title=structure.title or "Untitled",
-        author=structure.author or "",
-    )
-    doc.build(story)
+    finally:
+        if src_doc is not None:
+            try:
+                src_doc.close()
+            except Exception:
+                pass
 
 
 def _assemble_clean_pdf_pymupdf(
     structure: DocumentStructure,
     output_path: Path,
+    source_pdf_path: Optional[Path],
 ) -> None:
+    """
+    PyMuPDF fallback for clean PDF assembly.
+    Emits: title page → for each source page: scan page (300 DPI) + text-only page.
+    """
     doc = fitz.open()
     fitz_font_name = _get_fitz_font_name(structure.dominant_language)
     font = fitz.Font(fitz_font_name)
@@ -239,96 +296,111 @@ def _assemble_clean_pdf_pymupdf(
     title  = structure.title or "Untitled"
     author = structure.author or ""
 
-    page = doc.new_page(width=595, height=842)
+    # ── Title page ───────────────────────────────────────────────────────────
+    title_page = doc.new_page(width=595, height=842)
     try:
-        tw = fitz.TextWriter(page.rect)
+        tw = fitz.TextWriter(title_page.rect)
         tw.append(pos=(72, 200), text=title[:100], font=font, fontsize=20)
         if author:
             tw.append(pos=(72, 240), text=author[:100], font=font, fontsize=14)
-        tw.write_text(page)
+        tw.write_text(title_page)
     except Exception:
-        page.insert_text((72, 200), title[:100], fontsize=20)
+        title_page.insert_text((72, 200), title[:100], fontsize=20)
         if author:
-            page.insert_text((72, 240), author[:100], fontsize=14)
+            title_page.insert_text((72, 240), author[:100], fontsize=14)
 
-    has_any_content = False
-
-    for struct_page in structure.pages:
-        if not struct_page.elements and not struct_page.images:
-            continue
-
-        page = doc.new_page(width=595, height=842)
-        y_cursor = 60.0
-        margin_left = 50.0
-        max_width = 495.0
-
-        for el in struct_page.elements:
-            text = el.text.strip()
-            if not text:
-                continue
-            has_any_content = True
-
-            if el.element_type == "heading":
-                fs = 16 if el.level == 1 else 14 if el.level == 2 else 12
-                y_cursor += 8
-            elif el.element_type == "footnote":
-                fs = 9
-            elif el.element_type == "page-number":
-                fs = 8
-            elif el.element_type == "caption":
-                fs = 10
-            else:
-                fs = 11
-
-            lines = _wrap_text_fitz(text, font, fs, max_width)
-            for line in lines:
-                if y_cursor > 790:
-                    page = doc.new_page(width=595, height=842)
-                    y_cursor = 60.0
-                try:
-                    tw = fitz.TextWriter(page.rect)
-                    tw.append(pos=(margin_left, y_cursor), text=line,
-                              font=font, fontsize=fs)
-                    tw.write_text(page)
-                except Exception:
-                    try:
-                        page.insert_text((margin_left, y_cursor),
-                                         line[:200], fontsize=fs)
-                    except Exception:
-                        pass
-                y_cursor += fs * 1.5
-            y_cursor += 4
-
-        for img in struct_page.images:
-            if not img.image_bytes:
-                continue
-            has_any_content = True
-            try:
-                if y_cursor > 600:
-                    page = doc.new_page(width=595, height=842)
-                    y_cursor = 60.0
-                img_rect = fitz.Rect(margin_left, y_cursor,
-                                     margin_left + 400, y_cursor + 300)
-                page.insert_image(img_rect, stream=img.image_bytes)
-                y_cursor += 310
-            except Exception as e:
-                logger.warning(f"Could not embed image in PyMuPDF PDF: {e}")
-
-    if not has_any_content:
-        title_page = doc[0]
+    # Open source PDF for scan rasterisation
+    src_doc: Optional[fitz.Document] = None
+    if source_pdf_path is not None:
         try:
-            tw = fitz.TextWriter(title_page.rect)
-            tw.append(pos=(72, 300),
-                      text="[ No text content could be extracted ]",
-                      font=font, fontsize=12)
-            tw.write_text(title_page)
-        except Exception:
-            title_page.insert_text((72, 300),
-                                    "[ No text content could be extracted ]",
-                                    fontsize=12)
+            src_doc = fitz.open(str(source_pdf_path))
+        except Exception as e:
+            logger.warning(f"PyMuPDF fallback: could not open source PDF: {e}")
 
-    doc.save(str(output_path), garbage=4, deflate=True)
-    doc.close()
+    try:
+        has_any_content = False
+
+        for struct_page in structure.pages:
+            pno = struct_page.page_number
+
+            # ── 1. Original scan page ────────────────────────────────────────
+            if src_doc is not None and 0 <= pno < src_doc.page_count:
+                scan_jpeg = _rasterise_source_page_jpeg(src_doc, pno, _SCAN_DPI)
+                if scan_jpeg is not None:
+                    scan_page = doc.new_page(width=595, height=842)
+                    try:
+                        scan_page.insert_image(scan_page.rect, stream=scan_jpeg)
+                        has_any_content = True
+                    except Exception as e:
+                        logger.warning(f"PyMuPDF: could not insert scan image for page {pno}: {e}")
+
+            # ── 2. OCR text-only page ────────────────────────────────────────
+            text_elements = [el for el in struct_page.elements if el.text.strip()]
+            if not text_elements:
+                continue
+
+            text_page   = doc.new_page(width=595, height=842)
+            y_cursor    = 60.0
+            margin_left = 50.0
+            max_width   = 495.0
+
+            for el in text_elements:
+                text = el.text.strip()
+
+                if el.element_type == "heading":
+                    fs = 16 if el.level == 1 else 14 if el.level == 2 else 12
+                    y_cursor += 8
+                elif el.element_type == "footnote":
+                    fs = 9
+                elif el.element_type == "page-number":
+                    fs = 8
+                elif el.element_type == "caption":
+                    fs = 10
+                else:
+                    fs = 11
+
+                lines = _wrap_text_fitz(text, font, fs, max_width)
+                for line in lines:
+                    if y_cursor > 790:
+                        text_page = doc.new_page(width=595, height=842)
+                        y_cursor = 60.0
+                    try:
+                        tw = fitz.TextWriter(text_page.rect)
+                        tw.append(pos=(margin_left, y_cursor), text=line,
+                                  font=font, fontsize=fs)
+                        tw.write_text(text_page)
+                    except Exception:
+                        try:
+                            text_page.insert_text((margin_left, y_cursor),
+                                                  line[:200], fontsize=fs)
+                        except Exception:
+                            pass
+                    y_cursor += fs * 1.5
+                y_cursor += 4
+                has_any_content = True
+
+        if not has_any_content:
+            fallback_page = doc[0]
+            try:
+                tw = fitz.TextWriter(fallback_page.rect)
+                tw.append(pos=(72, 300),
+                          text="[ No text content could be extracted ]",
+                          font=font, fontsize=12)
+                tw.write_text(fallback_page)
+            except Exception:
+                fallback_page.insert_text((72, 300),
+                                           "[ No text content could be extracted ]",
+                                           fontsize=12)
+
+        doc.save(str(output_path), garbage=4, deflate=True)
+
+    finally:
+        doc.close()
+        if src_doc is not None:
+            try:
+                src_doc.close()
+            except Exception:
+                pass
 
 
 def _wrap_text_fitz(text: str, font, fontsize: float, max_width: float) -> List[str]:
