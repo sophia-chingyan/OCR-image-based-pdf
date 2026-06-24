@@ -146,6 +146,10 @@
       font-size:.82rem;color:var(--red);background:var(--red-soft);border-left:3px solid var(--red);
       padding:.6rem .85rem;border-radius:6px;margin-top:.25rem;
     }
+    .partial-msg{
+      font-size:.82rem;color:var(--amber);background:#fffbeb;border-left:3px solid var(--amber);
+      padding:.6rem .85rem;border-radius:6px;margin-top:.25rem;
+    }
 
     /* ── History cards ── */
     #history-section{margin-top:.5rem}
@@ -386,7 +390,6 @@ function renderPausedActions(id){
 
 async function startJob(id){
   try{
-    // Guard: at least one format must be selected.
     const checkedFmts=document.querySelectorAll('#format-picker .fmt-checkbox:checked');
     if(checkedFmts.length===0){showToast('Select at least one output format.');return;}
     const fmts=getSelectedFormats();
@@ -451,8 +454,12 @@ function updateProgressUI(job){
   progressActs.innerHTML='';const id=esc(job.job_id);
   if(job.status==='done'){
     formatSection.style.display='none';
-    progressActs.innerHTML=`<div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center;flex-wrap:wrap">${buildDownloadButtons(job)}</div>`;
-    showToast('Conversion complete!');
+    // ── Partial output: OCR stopped partway but a PDF was still produced ──
+    const partialBanner = job.partial
+      ? `<div class="partial-msg">⚠ Partial conversion — ${esc(job.pages_completed||'?')} of ${esc(job.pages_total||'?')} pages OCR'd. Page ${esc(job.failed_page||'?')} could not be processed (Gemini unavailable). The download below contains only the completed pages.</div>`
+      : '';
+    progressActs.innerHTML=`${partialBanner}<div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center;flex-wrap:wrap">${buildDownloadButtons(job)}</div>`;
+    showToast(job.partial ? `Partial conversion — ${job.pages_completed}/${job.pages_total} pages` : 'Conversion complete!');
   }else if(job.status==='failed'){
     formatSection.style.display='none';
     progressActs.innerHTML=`<div class="error-msg">${esc(job.error||'Conversion failed.')}</div>
@@ -482,7 +489,10 @@ function renderHistoryCard(job) {
   const id = esc(job.job_id);
   const pages = job.page_count ? `${job.page_count} pp` : '—';
   const created = fmtDate(job.created_at);
-  const status = STATUS_BADGE[job.status] || esc(job.status);
+  // Show "⚠ Partial" badge for partial conversions instead of plain Done
+  const status = (job.status === 'done' && job.partial)
+    ? `<span style="color:var(--amber)">⚠ Partial (${job.pages_completed}/${job.pages_total} pp)</span>`
+    : (STATUS_BADGE[job.status] || esc(job.status));
 
   let dlLink = '';
   if (job.status === 'done') {
