@@ -257,17 +257,21 @@ class GeminiOCREngine(OCREngine):
     """
 
     def __init__(self, config: dict):
-        self.config        = config
-        self.model_name    = config.get("model_name", "gemini-2.5-flash-lite")
-        self.rpm_limit     = int(config.get("rpm_limit", 10))
-        self.rpd_limit     = int(config.get("rpd_limit", 250))
-        self.api_key       = os.environ.get("GEMINI_API_KEY", "").strip()
-        self.max_retries   = int(config.get("max_retries", 3))
-        self.timeout_s     = int(config.get("request_timeout_s", 120))
-        self._client       = None
-        self._loaded       = False
-        self._rate_limiter = RateLimiter(self.rpm_limit)
+        self.config         = config
+        self.model_name     = config.get("model_name", "gemini-2.5-flash-lite")
+        self.rpm_limit      = int(config.get("rpm_limit", 10))
+        self.rpd_limit      = int(config.get("rpd_limit", 250))
+        self.api_key        = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.max_retries    = int(config.get("max_retries", 8))
+        self.timeout_s      = int(config.get("request_timeout_s", 180))
+        self._client        = None
+        self._loaded        = False
+        self._rate_limiter  = RateLimiter(self.rpm_limit)
         self._daily_limiter = DailyRateLimiter(self.rpd_limit)
+
+        # Backoff knobs — tunable via config.yaml if wired in, otherwise defaults.
+        self._retry_backoff_base_s = float(config.get("retry_backoff_base_s", 4.0))
+        self._retry_backoff_cap_s  = float(config.get("retry_backoff_cap_s", 120.0))
 
         self._page_cache: Dict[int, dict] = {}
         self._last_page_result: Optional[dict] = None
@@ -445,8 +449,8 @@ class GeminiOCREngine(OCREngine):
         jpeg_bytes, scale = self._image_to_jpeg(page_image)
         result = self._call_gemini_with_retry(jpeg_bytes)
 
-        # FIX #1: upscale bboxes from downscaled image space back to
-        # full-resolution (400 DPI) pixel space — both block and line boxes.
+        # Upscale bboxes from downscaled image space back to
+        # full-resolution pixel space — both block and line boxes.
         if scale < 1.0:
             inv_scale = 1.0 / scale
             for b in result.get("blocks", []):
@@ -491,10 +495,18 @@ class GeminiOCREngine(OCREngine):
 
         self._daily_limiter.check()
 
+        # 408 timeout, 429 rate-limit, 5xx capacity/availability errors.
+        RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
+
+        max_attempts = self.max_retries
+        backoff_base = self._retry_backoff_base_s
+        backoff_cap  = self._retry_backoff_cap_s
+
         attempt = 0
         last_exc: Exception = RuntimeError("no attempts made")
+        last_code = None
 
-        while attempt < self.max_retries:
+        while attempt < max_attempts:
             attempt += 1
             self._rate_limiter.wait()
             try:
@@ -520,28 +532,94 @@ class GeminiOCREngine(OCREngine):
             except genai_errors.APIError as e:
                 last_exc = e
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in (429, 503):
-                    wait = min(60, 5 * (2 ** (attempt - 1)))
+                last_code = code
+                if code in RETRYABLE_CODES:
+                    if attempt >= max_attempts:
+                        break
+                    wait = self._retry_delay_seconds(e, attempt, backoff_base, backoff_cap)
                     logger.warning(
-                        f"Gemini API throttled (HTTP {code}) — retry {attempt}/"
-                        f"{self.max_retries} in {wait}s"
+                        f"Gemini API transient error (HTTP {code}) — "
+                        f"retry {attempt}/{max_attempts} in {wait:.1f}s"
                     )
                     time.sleep(wait)
                     continue
+                # Non-retryable (400/401/403/404 …): fail fast.
                 raise
 
             except Exception as e:
                 last_exc = e
-                wait = 3 * attempt
+                last_code = None
+                if attempt >= max_attempts:
+                    break
+                wait = min(backoff_cap, backoff_base * attempt)
                 logger.warning(
-                    f"Gemini call failed: {e} — retry {attempt}/"
-                    f"{self.max_retries} in {wait}s"
+                    f"Gemini call failed: {e} — retry {attempt}/{max_attempts} in {wait:.1f}s"
                 )
                 time.sleep(wait)
 
+        code_str = f"HTTP {last_code} " if last_code else ""
         raise RuntimeError(
-            f"Gemini API failed after {self.max_retries} attempts: {last_exc}"
+            f"Gemini API failed after {attempt} attempts ({code_str}— last error: {last_exc})"
         )
+
+    def _retry_delay_seconds(self, exc, attempt: int, base: float, cap: float) -> float:
+        """Server-suggested delay if Gemini provides one, else exponential
+        backoff with full jitter, capped at `cap`."""
+        import random
+        server_hint = self._extract_retry_after(exc)
+        if server_hint is not None:
+            return min(cap, max(0.5, server_hint))
+        ceiling = min(cap, base * (2 ** (attempt - 1)))
+        return random.uniform(base, max(base, ceiling))
+
+    @staticmethod
+    def _extract_retry_after(exc) -> "Optional[float]":
+        """Best-effort pull of a server retry delay (seconds) from a
+        google-genai APIError. Gemini commonly returns RetryInfo like
+        {"@type": ".../RetryInfo", "retryDelay": "30s"}. Returns None if absent."""
+        import re
+        details = getattr(exc, "details", None)
+        candidates = []
+        try:
+            if isinstance(details, dict):
+                candidates.append(details)
+            elif isinstance(details, (list, tuple)):
+                candidates.extend(d for d in details if isinstance(d, dict))
+        except Exception:
+            pass
+        extra = getattr(exc, "response_json", None)
+        if isinstance(extra, dict):
+            candidates.append(extra)
+
+        def _walk(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("retryDelay", "retry_delay", "Retry-After", "retryAfter"):
+                        yield v
+                    else:
+                        yield from _walk(v)
+            elif isinstance(obj, (list, tuple)):
+                for v in obj:
+                    yield from _walk(v)
+
+        for root in candidates:
+            for val in _walk(root):
+                if isinstance(val, (int, float)):
+                    return float(val)
+                if isinstance(val, str):
+                    m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*s?\s*$", val)
+                    if m:
+                        return float(m.group(1))
+        try:
+            m = re.search(
+                r"retry[_ ]?delay['\"]?\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)\s*s",
+                str(exc), re.I,
+            )
+            if m:
+                return float(m.group(1))
+        except Exception:
+            pass
+        return None
 
     def _parse_response(self, text: str) -> dict:
         """Tolerantly parse Gemini's JSON response."""

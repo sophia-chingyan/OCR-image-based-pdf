@@ -14,6 +14,13 @@ Pause mechanism:
 - User clicks Resume/Start → job goes back to "queued" → worker picks up
   where it left off using cached OCR results
 
+Partial output on OCR failure:
+- If a page exhausts all Gemini retries, the loop breaks rather than raising.
+- All successfully OCR'd pages so far are assembled into a downloadable PDF.
+- Job is marked status="done" with partial=True and a descriptive message.
+- The OCR cache for completed pages is preserved so a future retry can
+  resume without re-spending quota on pages already done.
+
 Output formats:
 - "clean"      → assemble_clean_pdf() — re-typeset fresh PDF
 - "searchable" → assemble_searchable_pdf() — original scan + invisible text layer
@@ -165,7 +172,6 @@ def run_pipeline(r, job: dict, engine) -> None:
 
     language_hints = job.get("language_hints") or []
     engine.set_language_hints(language_hints)
-
     engine.reset_page_cache()
 
     ingested = None
@@ -176,11 +182,11 @@ def run_pipeline(r, job: dict, engine) -> None:
             cur = json.loads(raw)
             if cur.get("stop_requested") or cur.get("status") == "stopped":
                 update_job(r, job_id, status="stopped", message="Stopped by user.",
-                          stop_requested=False, pause_requested=False)
+                           stop_requested=False, pause_requested=False)
                 return "stop"
             if cur.get("pause_requested"):
                 update_job(r, job_id, status="paused", message="Paused by user.",
-                          pause_requested=False, stop_requested=False)
+                           pause_requested=False, stop_requested=False)
                 return "pause"
         return None
 
@@ -197,11 +203,12 @@ def run_pipeline(r, job: dict, engine) -> None:
         cached_n = _count_cached_pages(r, job_id, total_pages)
         if cached_n > 0:
             logger.info(f"Job {job_id}: resuming with {cached_n}/{total_pages} pages cached")
-            update_job(
-                r, job_id,
-                message=f"Resuming · {cached_n}/{total_pages} pages cached",
-                progress=2,
-            )
+            update_job(r, job_id,
+                       message=f"Resuming · {cached_n}/{total_pages} pages cached",
+                       progress=2)
+
+        failed_page = None
+        failed_error = None
 
         for page_num in range(total_pages):
             action = check_stop_or_pause()
@@ -212,7 +219,6 @@ def run_pipeline(r, job: dict, engine) -> None:
                 return
 
             progress = int(5 + (page_num / total_pages) * 80)
-
             cached = _load_ocr_page(r, job_id, page_num)
 
             if cached is not None:
@@ -227,9 +233,24 @@ def run_pipeline(r, job: dict, engine) -> None:
                            progress=progress)
                 page_img = rasterize_page(ingested.doc, page_num, dpi=DPI)
 
-            direction     = engine.detect_direction(page_img)
-            text_blocks   = engine.recognize(page_img, direction)
-            layout_blocks = engine.get_layout(page_img)
+            # Per-page OCR is isolated: a page that exhausts all retries breaks
+            # the loop cleanly, keeping everything done so far for partial output.
+            try:
+                direction     = engine.detect_direction(page_img)
+                text_blocks   = engine.recognize(page_img, direction)
+                layout_blocks = engine.get_layout(page_img)
+            except Exception as e:
+                engine.reset_page_cache()
+                try:
+                    del page_img
+                except Exception:
+                    pass
+                failed_page = page_num
+                failed_error = str(e)
+                logger.error(
+                    f"Job {job_id}: OCR failed on page {page_num+1}/{total_pages}: {e}"
+                )
+                break
 
             if cached is None:
                 page_result = engine.export_last_page_result()
@@ -244,17 +265,25 @@ def run_pipeline(r, job: dict, engine) -> None:
             structured_pages.append(sp)
             engine.reset_page_cache()
             del page_img, text_blocks, layout_blocks
-            # For large PDFs, collect every page to avoid OOM; otherwise per batch
             if total_pages > 50 or (page_num + 1) % BATCH_SIZE == 0:
                 gc.collect()
+
+        # Failed on the very first page — nothing to assemble.
+        if failed_page is not None and not structured_pages:
+            update_job(r, job_id, status="failed", message="Conversion failed.",
+                       error=f"OCR failed on page {failed_page+1}/{total_pages}: {failed_error}")
+            logger.error(f"Job {job_id}: failed on first page — {failed_error}")
+            return
+
+        is_partial = failed_page is not None
+        pages_done = len(structured_pages)
 
         toc = build_toc(structured_pages)
         dominant_lang = detect_dominant_language(structured_pages)
         logger.info(f"Job {job_id}: detected dominant language: {dominant_lang}")
         structure = DocumentStructure(
             title=ingested.meta.title, author=ingested.meta.author,
-            pages=structured_pages, toc=toc,
-            dominant_language=dominant_lang)
+            pages=structured_pages, toc=toc, dominant_language=dominant_lang)
 
         # ── Assemble requested output formats ────────────────────────────────
         formats = job.get("output_formats") or ["clean"]
@@ -264,7 +293,9 @@ def run_pipeline(r, job: dict, engine) -> None:
         assembly_errors: list[str] = []
 
         if "clean" in formats:
-            update_job(r, job_id, message="Building clean PDF…", progress=87)
+            update_job(r, job_id,
+                       message=("Building clean PDF (partial)…" if is_partial else "Building clean PDF…"),
+                       progress=87)
             try:
                 p = OUTPUT_DIR / f"{job_id}_clean.pdf"
                 assemble_clean_pdf(structure, p, source_pdf_path=pdf_path)
@@ -274,7 +305,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                 assembly_errors.append(f"clean: {e}")
 
         if "searchable" in formats:
-            update_job(r, job_id, message="Building searchable PDF…", progress=93)
+            update_job(r, job_id,
+                       message=("Building searchable PDF (partial)…" if is_partial else "Building searchable PDF…"),
+                       progress=93)
             try:
                 p = OUTPUT_DIR / f"{job_id}_searchable.pdf"
                 assemble_searchable_pdf(structure, pdf_path, p, dpi=DPI)
@@ -285,25 +318,45 @@ def run_pipeline(r, job: dict, engine) -> None:
 
         # ── Determine final status ───────────────────────────────────────────
         if produced:
-            removed = _clear_ocr_cache(r, job_id)
-            if removed:
-                logger.info(f"Job {job_id}: cleared {removed} cached OCR pages")
             done_fields = {"status": "done", "progress": 100}
             done_fields.update(produced)
-            if assembly_errors:
-                # Partial success: at least one format produced, but another failed.
-                err_detail = "; ".join(assembly_errors)
-                done_fields["message"] = f"Partial success (errors: {err_detail})"
-                done_fields["error"] = err_detail
-                logger.warning(f"Job {job_id} partial success: {err_detail}")
+
+            if is_partial:
+                # Keep OCR cache: completed pages are preserved so a future
+                # retry can fetch the remainder without re-spending quota.
+                note = (f"Partial — {pages_done}/{total_pages} pages. "
+                        f"Page {failed_page+1} could not be OCR'd: {failed_error}")
+                if assembly_errors:
+                    note += " | assembly: " + "; ".join(assembly_errors)
+                done_fields["message"] = note
+                done_fields["error"] = note
+                done_fields["partial"] = True
+                done_fields["pages_completed"] = pages_done
+                done_fields["pages_total"] = total_pages
+                done_fields["failed_page"] = failed_page + 1
+                logger.warning(f"Job {job_id} partial success: {note}")
             else:
-                done_fields["message"] = "Complete"
+                removed = _clear_ocr_cache(r, job_id)
+                if removed:
+                    logger.info(f"Job {job_id}: cleared {removed} cached OCR pages")
+                done_fields["partial"] = False
+                if assembly_errors:
+                    err_detail = "; ".join(assembly_errors)
+                    done_fields["message"] = f"Partial success (errors: {err_detail})"
+                    done_fields["error"] = err_detail
+                    logger.warning(f"Job {job_id} partial success: {err_detail}")
+                else:
+                    done_fields["message"] = "Complete"
+
             update_job(r, job_id, **done_fields)
             logger.info(f"Job {job_id} done: {produced}")
         else:
-            err = "; ".join(assembly_errors) or "No output produced"
-            update_job(r, job_id, status="failed",
-                       message="Conversion failed.", error=err)
+            if is_partial:
+                err = (f"OCR stopped at page {failed_page+1}/{total_pages} "
+                       f"({failed_error}); no pages could be assembled.")
+            else:
+                err = "; ".join(assembly_errors) or "No output produced"
+            update_job(r, job_id, status="failed", message="Conversion failed.", error=err)
             logger.error(f"Job {job_id} failed: {err}")
 
     except Exception as exc:
@@ -400,6 +453,7 @@ def main():
     _worker_healthy = True
     _worker_error = ""
     logger.info("OCR engine ready.")
+
     r = get_sync_redis()
     last_cleanup = time.time()
 
