@@ -3,10 +3,17 @@ ocr:
   model_name: "gemini-2.5-flash-lite"
   rpm_limit: 2000
   rpd_limit: 10000
-  max_retries: 5
+  max_retries: 8                # was 5 — rides out longer 503 "high demand" spikes
   request_timeout_s: 180
   confidence_threshold: 0.7
   dpi: 300
+
+  # Optional backoff tuning for transient Gemini errors (429 / 5xx).
+  # The retry logic reads these via getattr() with the defaults shown below,
+  # so they are OPTIONAL — uncomment only if you wire them into the engine's
+  # __init__ (e.g. self._retry_backoff_base_s = cfg.get("retry_backoff_base_s", 4.0)).
+  # retry_backoff_base_s: 4.0   # first-retry base wait, seconds
+  # retry_backoff_cap_s: 120.0  # maximum single backoff wait, seconds
 
 pipeline:
   max_pdf_size_mb: 100
