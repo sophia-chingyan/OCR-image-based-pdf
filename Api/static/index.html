@@ -456,7 +456,7 @@ function updateProgressUI(job){
     formatSection.style.display='none';
     // ── Partial output: OCR stopped partway but a PDF was still produced ──
     const partialBanner = job.partial
-      ? `<div class="partial-msg">⚠ Partial conversion — ${esc(job.pages_completed||'?')} of ${esc(job.pages_total||'?')} pages OCR'd. Page ${esc(job.failed_page||'?')} could not be processed (Gemini unavailable). The download below contains only the completed pages.</div>`
+      ? `<div class="partial-msg">⚠ ${esc(job.message || `Partial — ${job.pages_completed||'?'}/${job.pages_total||'?'} pages OCR'd. Skipped page(s): ${(job.failed_pages||[job.failed_page]).join(', ')}.`)} The download below contains only the completed pages.</div>`
       : '';
     progressActs.innerHTML=`${partialBanner}<div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center;flex-wrap:wrap">${buildDownloadButtons(job)}</div>`;
     showToast(job.partial ? `Partial conversion — ${job.pages_completed}/${job.pages_total} pages` : 'Conversion complete!');
