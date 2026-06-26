@@ -28,6 +28,27 @@ Per-line boxes:
 Each block now includes a "lines" array of {text, bbox} entries so the
 searchable PDF assembler can overlay invisible text at per-line (horizontal)
 or per-character-column (vertical) precision rather than block level.
+
+Tiling fallback (diagram / sparse pages):
+When Gemini returns zero text blocks for a page that is large enough to
+contain text (e.g. a diagram with scattered labels or a rotated-text page),
+the engine automatically tiles the full-resolution page image into a 2×2
+grid and sends each quadrant as a separate API call.  Block bboxes returned
+from each tile are translated back into full-page pixel coordinates before
+merging.  This lets small peripheral labels (味覺, 聽覺, …) get enough
+pixels per character to be recognised reliably.
+
+The tiling strategy:
+  - Triggered only when the whole-page call returns 0 non-empty blocks AND
+    the longer image side exceeds TILE_TRIGGER_PX (default 1500 px at the
+    rasterisation DPI — well above what a genuinely blank page would be).
+  - Tiles share a 10% overlap so text near quadrant boundaries is not split.
+  - Each tile call goes through the normal retry / rate-limiting path.
+  - Duplicate blocks (same text appearing in the overlap zone of two tiles)
+    are de-duplicated by NMS-style bbox overlap check.
+  - Tiling is logged at INFO level so you can see it in Zeabur logs.
+  - The merged result is cached in the normal page cache so downstream
+    calls (detect_direction / recognize / get_layout) all see the same data.
 """
 
 from __future__ import annotations
@@ -47,6 +68,19 @@ from ocr_engine import (
 
 logger = logging.getLogger(__name__)
 
+# ── Tiling constants ──────────────────────────────────────────────────────────
+# Minimum long-side pixel count (in the ORIGINAL rasterised image, before
+# Gemini downscaling) that qualifies for tiling.  Pages shorter than this
+# are considered genuinely blank when Gemini returns no blocks.
+TILE_TRIGGER_PX: int = 1500
+
+# Overlap fraction between adjacent tiles (in each axis).
+# 0.10 = 10 % overlap so labels near quadrant edges are captured by both tiles.
+TILE_OVERLAP: float = 0.10
+
+# NMS de-dup threshold: two merged blocks are considered duplicates if their
+# bbox IoU exceeds this value AND their text is identical.
+TILE_DEDUP_IOU: float = 0.30
 
 # ── Language detection helpers ────────────────────────────────────────────────
 CJK_RANGES = [
@@ -246,6 +280,14 @@ Rules:
 - Return ONLY the JSON object, no commentary, no markdown fences, no explanations, no introductions, and no conclusions.
 """
 
+# Tiling-specific addendum injected when a tile (not the full page) is sent.
+_TILE_PROMPT_ADDENDUM = (
+    "\n- IMPORTANT: This image is a CROPPED QUADRANT of a larger page. "
+    "There may be text at any edge of this image that continues outside the crop. "
+    "Extract ALL text you can see, even if it appears partially cut off at the edges. "
+    "Do NOT add text that is not visible — only what is literally present in this cropped image."
+)
+
 
 class GeminiOCREngine(OCREngine):
     """
@@ -254,6 +296,10 @@ class GeminiOCREngine(OCREngine):
     A single API call per page returns OCR text + layout classification +
     direction detection + per-line bounding boxes. This minimises API quota use
     while enabling per-line precision in the searchable PDF text layer.
+
+    When the whole-page call yields zero blocks on a large image (indicating a
+    diagram/diagram page with scattered small labels), the engine automatically
+    tiles the image into a 2×2 grid with 10% overlap and merges the results.
     """
 
     def __init__(self, config: dict):
@@ -377,16 +423,19 @@ class GeminiOCREngine(OCREngine):
     def set_language_hints(self, hints: List[str]) -> None:
         self._language_hints = [h for h in (hints or []) if h in LANGUAGE_HINT_LABELS]
 
-    def _build_prompt(self) -> str:
+    def _build_prompt(self, tile: bool = False) -> str:
+        base = _OCR_PROMPT_BASE
+        if tile:
+            base = base + _TILE_PROMPT_ADDENDUM
         if not self._language_hints:
-            return _OCR_PROMPT_BASE
+            return base
         labels = ", ".join(LANGUAGE_HINT_LABELS[h] for h in self._language_hints)
         hint_line = (
             f"- Language priority: This document is expected to primarily contain {labels}."
             " Prioritize recognition of these languages and scripts,"
             " but still recognize all text accurately.\n"
         )
-        return _OCR_PROMPT_BASE + hint_line
+        return base + hint_line
 
     def reset_page_cache(self):
         self._page_cache.clear()
@@ -431,6 +480,10 @@ class GeminiOCREngine(OCREngine):
 
         Reusing the cached result across detect_direction / recognize /
         get_layout means each PDF page costs exactly ONE API call.
+
+        If the whole-page call yields zero text blocks and the image is large
+        enough that a real page would have produced text, we fall back to
+        tiling (2×2 grid with 10% overlap) and merge the results.
         """
         self._assert_loaded()
 
@@ -446,29 +499,151 @@ class GeminiOCREngine(OCREngine):
             self._last_page_result = result
             return result
 
+        # ── Full-page pass ───────────────────────────────────────────────────
         jpeg_bytes, scale = self._image_to_jpeg(page_image)
         result = self._call_gemini_with_retry(jpeg_bytes)
 
-        # Upscale bboxes from downscaled image space back to
-        # full-resolution pixel space — both block and line boxes.
+        non_empty_blocks = [
+            b for b in result.get("blocks", [])
+            if _coerce_str(b.get("text")).strip()
+        ]
+
         if scale < 1.0:
             inv_scale = 1.0 / scale
-            for b in result.get("blocks", []):
-                bbox = b.get("bbox")
-                if isinstance(bbox, list) and len(bbox) >= 4:
-                    b["bbox"] = [v * inv_scale for v in bbox[:4]]
-                for ln in (b.get("lines") or []):
-                    lb = ln.get("bbox")
-                    if isinstance(lb, list) and len(lb) >= 4:
-                        ln["bbox"] = [v * inv_scale for v in lb[:4]]
+            self._upscale_bboxes(result, inv_scale)
+
+        if not non_empty_blocks:
+            # Log clearly so future debugging can distinguish 200-but-empty
+            # from 503 failures.
+            h, w = page_image.shape[:2]
+            long_side = max(h, w)
+            logger.info(
+                f"Gemini returned 0 text blocks for this page "
+                f"(image {w}×{h}px, long_side={long_side}). "
+                f"{'Attempting tiled OCR fallback.' if long_side >= TILE_TRIGGER_PX else 'Page treated as image-only (genuinely blank or decorative).'}"
+            )
+            if long_side >= TILE_TRIGGER_PX:
+                result = self._analyse_page_tiled(page_image, result)
 
         self._page_cache[cache_key] = result
         self._last_page_result = result
         return result
 
+    # ── Tiling helpers ───────────────────────────────────────────────────────
+
+    def _analyse_page_tiled(self, page_image, whole_page_result: dict) -> dict:
+        """
+        Split `page_image` into a 2×2 grid with TILE_OVERLAP fraction
+        overlap on each axis.  Send each quadrant to Gemini, translate
+        bboxes back to full-page pixel space, merge all blocks, and
+        de-duplicate overlapping identical detections.
+
+        Returns a normalised result dict in the same format as a regular
+        whole-page call.  If tiling produces no blocks either, we return
+        the original whole-page result (empty blocks = image-only page).
+        """
+        import numpy as np
+
+        h, w = page_image.shape[:2]
+        logger.info(f"Tiling page image ({w}×{h}px) into 2×2 grid for diagram/sparse-text OCR.")
+
+        # Tile boundary computation (with overlap).
+        #   col 0: x in [0,       mid_x + overlap_x]
+        #   col 1: x in [mid_x - overlap_x, w      ]
+        #   row 0: y in [0,       mid_y + overlap_y]
+        #   row 1: y in [mid_y - overlap_y, h      ]
+        mid_x = w // 2
+        mid_y = h // 2
+        ox = int(w * TILE_OVERLAP)
+        oy = int(h * TILE_OVERLAP)
+
+        tiles = [
+            # (col, row, x_start, y_start, x_end, y_end)
+            (0, 0,          0,          0, mid_x + ox, mid_y + oy),
+            (1, 0, mid_x - ox,          0,          w, mid_y + oy),
+            (0, 1,          0, mid_y - oy, mid_x + ox,          h),
+            (1, 1, mid_x - ox, mid_y - oy,          w,          h),
+        ]
+
+        merged_blocks: List[dict] = []
+        dominant_direction = _coerce_str(whole_page_result.get("direction", "horizontal"))
+
+        for idx, (col, row, x0, y0, x1, y1) in enumerate(tiles):
+            tile_img = page_image[y0:y1, x0:x1]
+            if tile_img.size == 0:
+                continue
+
+            logger.info(
+                f"  Tile {idx+1}/4 (col={col}, row={row}, "
+                f"crop=[{x0}:{x1}, {y0}:{y1}]) — calling Gemini…"
+            )
+            try:
+                jpeg_bytes, tile_scale = self._image_to_jpeg_tile(tile_img)
+                tile_result = self._call_gemini_with_retry(jpeg_bytes, tile=True)
+            except Exception as e:
+                logger.warning(f"  Tile {idx+1}/4 failed: {e} — skipping tile.")
+                continue
+
+            tile_dir = _coerce_str(tile_result.get("direction", "horizontal")).lower()
+            if tile_dir == "vertical":
+                dominant_direction = "vertical"
+
+            # Translate tile bboxes back to full-page pixel space.
+            inv_tile_scale = 1.0 / tile_scale if tile_scale < 1.0 else 1.0
+            for b in tile_result.get("blocks", []):
+                text = _coerce_str(b.get("text")).strip()
+                if not text:
+                    continue
+                raw_bbox = _coerce_bbox(b.get("bbox"))
+                # tile pixel space → full-page pixel space
+                full_bbox = [
+                    raw_bbox[0] * inv_tile_scale + x0,
+                    raw_bbox[1] * inv_tile_scale + y0,
+                    raw_bbox[2] * inv_tile_scale + x0,
+                    raw_bbox[3] * inv_tile_scale + y0,
+                ]
+                adjusted_lines = []
+                for ln in (b.get("lines") or []):
+                    lb = _coerce_bbox(ln.get("bbox"))
+                    adjusted_lines.append({
+                        "text": _coerce_str(ln.get("text")),
+                        "bbox": [
+                            lb[0] * inv_tile_scale + x0,
+                            lb[1] * inv_tile_scale + y0,
+                            lb[2] * inv_tile_scale + x0,
+                            lb[3] * inv_tile_scale + y0,
+                        ],
+                    })
+                merged_blocks.append({
+                    "text":  text,
+                    "type":  _coerce_str(b.get("type")),
+                    "bbox":  full_bbox,
+                    "lines": adjusted_lines,
+                })
+                logger.debug(
+                    f"  Tile {idx+1} block: {text[:40]!r} bbox={[round(v) for v in full_bbox]}"
+                )
+
+        if not merged_blocks:
+            logger.info("  Tiled OCR also returned 0 blocks — treating page as image-only.")
+            return whole_page_result
+
+        # De-duplicate: remove blocks that share identical text and have
+        # significant bbox overlap with an already-accepted block.
+        deduped = _dedup_blocks(merged_blocks, iou_threshold=TILE_DEDUP_IOU)
+        logger.info(
+            f"  Tiled OCR complete: {len(merged_blocks)} raw blocks → "
+            f"{len(deduped)} after dedup."
+        )
+
+        return self._normalise_result({
+            "direction": dominant_direction,
+            "blocks":    deduped,
+        })
+
     def _image_to_jpeg(self, page_image) -> tuple[bytes, float]:
         """
-        Convert OpenCV BGR ndarray to JPEG bytes for the API.
+        Convert OpenCV BGR ndarray to JPEG bytes for the full-page API call.
         Returns (jpeg_bytes, scale_factor).
         """
         from PIL import Image
@@ -489,13 +664,49 @@ class GeminiOCREngine(OCREngine):
         pil.save(buf, format="JPEG", quality=85, optimize=True)
         return buf.getvalue(), scale
 
-    def _call_gemini_with_retry(self, jpeg_bytes: bytes) -> dict:
+    def _image_to_jpeg_tile(self, tile_image) -> tuple[bytes, float]:
+        """
+        Convert a tile ndarray to JPEG.  Tiles are already quarter-page size
+        so they fit within 2048px at full resolution in most cases.  We still
+        cap at 2048px for safety.  Returns (jpeg_bytes, scale_factor).
+        """
+        from PIL import Image
+        import numpy as np
+        h, w = tile_image.shape[:2]
+        max_side = 2048
+        scale = 1.0
+        if max(h, w) > max_side:
+            scale = max_side / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            import cv2
+            tile_image = cv2.resize(tile_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        rgb = tile_image[:, :, ::-1]
+        pil = Image.fromarray(rgb.astype(np.uint8))
+        buf = io.BytesIO()
+        # Slightly higher quality for tiles since they are the "second chance".
+        pil.save(buf, format="JPEG", quality=90, optimize=True)
+        return buf.getvalue(), scale
+
+    @staticmethod
+    def _upscale_bboxes(result: dict, inv_scale: float) -> None:
+        """Multiply all block and line bboxes in-place by inv_scale."""
+        for b in result.get("blocks", []):
+            bbox = b.get("bbox")
+            if isinstance(bbox, list) and len(bbox) >= 4:
+                b["bbox"] = [v * inv_scale for v in bbox[:4]]
+            for ln in (b.get("lines") or []):
+                lb = ln.get("bbox")
+                if isinstance(lb, list) and len(lb) >= 4:
+                    ln["bbox"] = [v * inv_scale for v in lb[:4]]
+
+    def _call_gemini_with_retry(self, jpeg_bytes: bytes, tile: bool = False) -> dict:
         from google.genai import types
         from google.genai import errors as genai_errors
 
         self._daily_limiter.check()
 
-        # 408 timeout, 429 rate-limit, 5xx capacity/availability errors.
         RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
 
         max_attempts = self.max_retries
@@ -514,7 +725,7 @@ class GeminiOCREngine(OCREngine):
                     model=self.model_name,
                     contents=[
                         types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
-                        self._build_prompt(),
+                        self._build_prompt(tile=tile),
                     ],
                     config=types.GenerateContentConfig(
                         temperature=0.0,
@@ -677,3 +888,47 @@ class GeminiOCREngine(OCREngine):
     def _assert_loaded(self):
         if not self._loaded:
             raise RuntimeError("GeminiOCREngine.load() must be called before use.")
+
+
+# ── Block de-duplication (for tiled results) ──────────────────────────────────
+
+def _bbox_iou(a: list, b: list) -> float:
+    """Intersection-over-union of two [x0,y0,x1,y1] bboxes."""
+    ix0 = max(a[0], b[0])
+    iy0 = max(a[1], b[1])
+    ix1 = min(a[2], b[2])
+    iy1 = min(a[3], b[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    inter = (ix1 - ix0) * (iy1 - iy0)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _dedup_blocks(blocks: List[dict], iou_threshold: float) -> List[dict]:
+    """
+    Remove duplicate blocks from merged tile results.
+
+    A block is a duplicate if:
+      1. Its text (stripped) exactly matches an already-accepted block's text, AND
+      2. Its bbox overlaps the accepted block with IoU >= iou_threshold.
+
+    This handles text labels that fall in the 10% overlap zone between two
+    adjacent tiles and therefore appear in both tiles' responses.
+    """
+    accepted: List[dict] = []
+    for b in blocks:
+        text = _coerce_str(b.get("text")).strip()
+        bbox = _coerce_bbox(b.get("bbox"))
+        is_dup = False
+        for a in accepted:
+            if _coerce_str(a.get("text")).strip() != text:
+                continue
+            if _bbox_iou(bbox, _coerce_bbox(a.get("bbox"))) >= iou_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            accepted.append(b)
+    return accepted
