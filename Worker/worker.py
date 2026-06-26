@@ -14,12 +14,17 @@ Pause mechanism:
 - User clicks Resume/Start → job goes back to "queued" → worker picks up
   where it left off using cached OCR results
 
-Partial output on OCR failure:
-- If a page exhausts all Gemini retries, the loop breaks rather than raising.
-- All successfully OCR'd pages so far are assembled into a downloadable PDF.
-- Job is marked status="done" with partial=True and a descriptive message.
-- The OCR cache for completed pages is preserved so a future retry can
-  resume without re-spending quota on pages already done.
+Skip-and-continue on OCR failure:
+- If a page exhausts all Gemini retries, that page is SKIPPED (not the whole
+  job). Its 0-based index is appended to `failed_pages` and the loop moves on.
+- After all pages are attempted, every successfully OCR'd page is assembled
+  into a downloadable PDF (skipped pages simply don't appear in the output).
+- If at least one page was skipped the job is marked status="done" with
+  partial=True. The job record carries `failed_pages` (1-based list) and a
+  human-readable message listing all skipped page numbers / ranges.
+- Only if EVERY page fails is the job marked status="failed".
+- The OCR cache for completed pages is preserved so a future retry
+  re-attempts only the skipped pages without re-spending quota.
 
 Output formats:
 - "clean"      → assemble_clean_pdf() — re-typeset fresh PDF
@@ -156,7 +161,26 @@ def _clear_ocr_cache(r, job_id: str) -> int:
     return deleted
 
 
-# ── Pipeline ─────────────────────────────────────────────────────────────────
+def _format_page_list(page_indexes: list[int]) -> str:
+    """
+    Turn a list of 0-based page indexes into a compact, human-readable,
+    1-based range string. e.g. [0, 1, 2, 5, 7, 8, 9] → "1–3, 6, 8–10".
+    """
+    if not page_indexes:
+        return ""
+    pages = sorted(set(p + 1 for p in page_indexes))
+    parts: list[str] = []
+    start = prev = pages[0]
+    for p in pages[1:]:
+        if p == prev + 1:
+            prev = p
+            continue
+        parts.append(str(start) if start == prev else f"{start}–{prev}")
+        start = prev = p
+    parts.append(str(start) if start == prev else f"{start}–{prev}")
+    return ", ".join(parts)
+
+
 
 def run_pipeline(r, job: dict, engine) -> None:
     from pdf_ingestion import ingest_pdf, rasterize_page
@@ -207,8 +231,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                        message=f"Resuming · {cached_n}/{total_pages} pages cached",
                        progress=2)
 
-        failed_page = None
-        failed_error = None
+        # Pages that exhausted all OCR retries and were skipped (0-based indexes).
+        failed_pages: list[int] = []
+        last_error = ""
 
         for page_num in range(total_pages):
             action = check_stop_or_pause()
@@ -233,8 +258,9 @@ def run_pipeline(r, job: dict, engine) -> None:
                            progress=progress)
                 page_img = rasterize_page(ingested.doc, page_num, dpi=DPI)
 
-            # Per-page OCR is isolated: a page that exhausts all retries breaks
-            # the loop cleanly, keeping everything done so far for partial output.
+            # Per-page OCR is isolated: a page that exhausts all retries is
+            # SKIPPED (recorded in failed_pages) so the loop continues to the
+            # next page rather than aborting the whole job.
             try:
                 direction     = engine.detect_direction(page_img)
                 text_blocks   = engine.recognize(page_img, direction)
@@ -245,12 +271,19 @@ def run_pipeline(r, job: dict, engine) -> None:
                     del page_img
                 except Exception:
                     pass
-                failed_page = page_num
-                failed_error = str(e)
+                failed_pages.append(page_num)
+                last_error = str(e)
                 logger.error(
-                    f"Job {job_id}: OCR failed on page {page_num+1}/{total_pages}: {e}"
+                    f"Job {job_id}: OCR failed on page {page_num+1}/{total_pages}: {e} "
+                    f"— skipping and continuing"
                 )
-                break
+                update_job(r, job_id,
+                           message=f"Skipped page {page_num+1} / {total_pages} "
+                                   f"(OCR failed) — continuing…",
+                           progress=progress)
+                if total_pages > 50 or (page_num + 1) % BATCH_SIZE == 0:
+                    gc.collect()
+                continue
 
             if cached is None:
                 page_result = engine.export_last_page_result()
@@ -268,14 +301,15 @@ def run_pipeline(r, job: dict, engine) -> None:
             if total_pages > 50 or (page_num + 1) % BATCH_SIZE == 0:
                 gc.collect()
 
-        # Failed on the very first page — nothing to assemble.
-        if failed_page is not None and not structured_pages:
+        # Every page failed — nothing to assemble.
+        if failed_pages and not structured_pages:
             update_job(r, job_id, status="failed", message="Conversion failed.",
-                       error=f"OCR failed on page {failed_page+1}/{total_pages}: {failed_error}")
-            logger.error(f"Job {job_id}: failed on first page — {failed_error}")
+                       error=f"OCR failed on all {total_pages} page(s). "
+                             f"Last error: {last_error}")
+            logger.error(f"Job {job_id}: all pages failed OCR — {last_error}")
             return
 
-        is_partial = failed_page is not None
+        is_partial = bool(failed_pages)
         pages_done = len(structured_pages)
 
         toc = build_toc(structured_pages)
@@ -323,9 +357,13 @@ def run_pipeline(r, job: dict, engine) -> None:
 
             if is_partial:
                 # Keep OCR cache: completed pages are preserved so a future
-                # retry can fetch the remainder without re-spending quota.
-                note = (f"Partial — {pages_done}/{total_pages} pages. "
-                        f"Page {failed_page+1} could not be OCR'd: {failed_error}")
+                # retry re-attempts only the skipped pages without re-spending
+                # quota on the ones already done.
+                failed_1based = [p + 1 for p in sorted(failed_pages)]
+                failed_list = _format_page_list(failed_pages)
+                note = (f"Partial — {pages_done}/{total_pages} pages OCR'd. "
+                        f"Skipped {len(failed_pages)} page(s) that could not be "
+                        f"OCR'd: {failed_list}")
                 if assembly_errors:
                     note += " | assembly: " + "; ".join(assembly_errors)
                 done_fields["message"] = note
@@ -333,7 +371,8 @@ def run_pipeline(r, job: dict, engine) -> None:
                 done_fields["partial"] = True
                 done_fields["pages_completed"] = pages_done
                 done_fields["pages_total"] = total_pages
-                done_fields["failed_page"] = failed_page + 1
+                done_fields["failed_pages"] = failed_1based           # full list
+                done_fields["failed_page"] = failed_1based[0]         # back-compat
                 logger.warning(f"Job {job_id} partial success: {note}")
             else:
                 removed = _clear_ocr_cache(r, job_id)
@@ -352,8 +391,8 @@ def run_pipeline(r, job: dict, engine) -> None:
             logger.info(f"Job {job_id} done: {produced}")
         else:
             if is_partial:
-                err = (f"OCR stopped at page {failed_page+1}/{total_pages} "
-                       f"({failed_error}); no pages could be assembled.")
+                err = (f"{pages_done} page(s) OCR'd but none could be assembled; "
+                       f"skipped pages: {_format_page_list(failed_pages)}.")
             else:
                 err = "; ".join(assembly_errors) or "No output produced"
             update_job(r, job_id, status="failed", message="Conversion failed.", error=err)
