@@ -75,7 +75,7 @@ The entire application runs as **one container, one process**. The FastAPI API a
          ↕ API calls (1 per page)
 ┌─────────────────────────────────────────────────────────────────┐
 │               Google Gemini API                                 │
-│         (gemini-2.5-flash-lite — OCR + layout JSON)             │
+│         (gemini-3.5-flash-lite — OCR + layout JSON)             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -177,7 +177,7 @@ The single output format is a clean, re-typeset PDF produced from one OCR pass.
 
 ### 7. OCR Engine: Google Gemini
 
-**Model:** `gemini-2.5-flash-lite` (configurable via `config.yaml`)
+**Model:** `gemini-3.5-flash-lite` (configurable via `config.yaml`)
 
 **Strategy:** One API call per PDF page. The call returns OCR text, layout classification, and text direction in a single structured JSON response — no separate layout analysis pass needed.
 
@@ -203,7 +203,7 @@ The single output format is a clean, re-typeset PDF produced from one OCR pass.
 
 **Image preparation:** Pages rasterized at `dpi` (default 400), then downscaled to max 2048px on the longest side before sending to Gemini to control token usage.
 
-**Free tier limits for `gemini-2.5-flash-lite`:**
+**Free tier limits for `gemini-3.5-flash-lite`:**
 - 15 requests per minute (RPM)
 - 1,000 requests per day (RPD)
 - Quota resets at midnight Pacific Time
@@ -345,7 +345,7 @@ Upload (PDF saved, page count read, job record created)
 ```yaml
 ocr:
   engine: gemini
-  model_name: "gemini-2.5-flash-lite"  # change to gemini-2.5-flash for better accuracy
+  model_name: "gemini-3.5-flash-lite"  # change to gemini-3.5-flash for better accuracy
   rpm_limit: 15                         # match your Gemini tier
   rpd_limit: 1000
   max_retries: 3
@@ -374,7 +374,7 @@ server:
 |---|---|---|
 | API & Web Server | FastAPI (Python 3.11) | Single process with Worker thread |
 | OAuth2 Client | Authlib | Google OAuth2, dynamic callback URL |
-| OCR Engine | Google Gemini (`gemini-2.5-flash-lite`) | Via `google-genai` SDK |
+| OCR Engine | Google Gemini (`gemini-3.5-flash-lite`) | Via `google-genai` SDK |
 | PDF Processing | PyMuPDF (fitz) | Ingestion, rasterization |
 | Image Processing | OpenCV (`opencv-python-headless`) | BGR conversion |
 | PDF Re-typesetting | ReportLab | Clean PDF output with CJK font support |

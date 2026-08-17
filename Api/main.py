@@ -27,6 +27,7 @@ with open(CONFIG_PATH) as f:
     CFG = yaml.safe_load(f)
 
 MAX_UPLOAD_BYTES = CFG["pipeline"]["max_pdf_size_mb"] * 1024 * 1024
+IMAGE_EXTENSIONS = (".jpg", ".jpeg")
 UPLOAD_DIR  = Path("/app/uploads")
 OUTPUT_DIR  = Path("/app/outputs")
 TMPWORK_DIR = Path("/app/tmp-work")
@@ -230,8 +231,10 @@ async def upload_pdf(
     user: str = Depends(require_auth),
 ):
     fname = (file.filename or "").strip()
-    if not fname or not fname.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are accepted.")
+    fname_lower = fname.lower()
+    is_image = fname_lower.endswith(IMAGE_EXTENSIONS)
+    if not fname or not (fname_lower.endswith(".pdf") or is_image):
+        raise HTTPException(400, "Only PDF or JPG files are accepted.")
 
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
@@ -239,13 +242,14 @@ async def upload_pdf(
             413, f"File exceeds {CFG['pipeline']['max_pdf_size_mb']}MB limit."
         )
 
-    job_id   = str(uuid.uuid4())
-    pdf_path = UPLOAD_DIR / f"{job_id}.pdf"
-    total    = 0
-    CHUNK    = 1024 * 1024
+    job_id     = str(uuid.uuid4())
+    pdf_path   = UPLOAD_DIR / f"{job_id}.pdf"
+    stage_path = (UPLOAD_DIR / f"{job_id}_src.jpg") if is_image else pdf_path
+    total      = 0
+    CHUNK      = 1024 * 1024
 
     try:
-        async with aiofiles.open(pdf_path, "wb") as out:
+        async with aiofiles.open(stage_path, "wb") as out:
             while True:
                 chunk = await file.read(CHUNK)
                 if not chunk:
@@ -259,23 +263,35 @@ async def upload_pdf(
                 await out.write(chunk)
     except HTTPException:
         try:
-            pdf_path.unlink(missing_ok=True)
+            stage_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
     except Exception:
         try:
-            pdf_path.unlink(missing_ok=True)
+            stage_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
 
     if total == 0:
         try:
-            pdf_path.unlink(missing_ok=True)
+            stage_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise HTTPException(400, "Uploaded file is empty.")
+
+    if is_image:
+        try:
+            from Worker.pdf_ingestion import convert_image_to_pdf
+            convert_image_to_pdf(stage_path, pdf_path, dpi=CFG["ocr"]["dpi"])
+        except Exception:
+            raise HTTPException(400, "Uploaded file is not a valid JPG image.")
+        finally:
+            try:
+                stage_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     formats = ["clean"]
 

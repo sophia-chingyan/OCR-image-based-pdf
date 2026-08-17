@@ -12,7 +12,7 @@ Why Gemini:
 - Single API call returns text, layout classification, direction, and
   per-line bounding boxes (for tight searchable-PDF selection alignment)
 
-Default model: gemini-2.5-flash-lite (configurable in config.yaml under ocr.model_name).
+Default model: gemini-3.5-flash-lite (configurable in config.yaml under ocr.model_name).
 
 Rate-limiting:
 The engine self-throttles to stay within the configured RPM.
@@ -304,7 +304,7 @@ class GeminiOCREngine(OCREngine):
 
     def __init__(self, config: dict):
         self.config         = config
-        self.model_name     = config.get("model_name", "gemini-2.5-flash-lite")
+        self.model_name     = config.get("model_name", "gemini-3.5-flash-lite")
         self.rpm_limit      = int(config.get("rpm_limit", 10))
         self.rpd_limit      = int(config.get("rpd_limit", 250))
         self.api_key        = os.environ.get("GEMINI_API_KEY", "").strip()
