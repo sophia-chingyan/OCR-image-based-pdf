@@ -1,6 +1,6 @@
 ocr:
   engine: gemini
-  model_name: "gemini-2.5-flash-lite"
+  model_name: "gemini-3.5-flash-lite"
   rpm_limit: 2000
   rpd_limit: 10000
   max_retries: 8                # was 5 — rides out longer 503 "high demand" spikes

@@ -1,15 +1,16 @@
-# PDF → Clean PDF Converter
+# PDF/JPG → Clean PDF Converter
 
-Self-hosted, single-user web app that converts **image-based PDF files** to clean, re-typeset PDF files using **Google Gemini** for OCR.
+Self-hosted, single-user web app that converts **image-based PDF files and JPG images** to clean, re-typeset PDF files using **Google Gemini** for OCR.
 
-- ✅ OCR via Google Gemini (`gemini-2.5-flash-lite` by default)
+- ✅ Upload **PDF or JPG/JPEG** files — a JPG is auto-wrapped into a one-page PDF and OCR'd the same way
+- ✅ OCR via Google Gemini (`gemini-3.5-flash-lite` by default)
 - ✅ Languages: Traditional Chinese, Simplified Chinese, Japanese, Korean, English (and 100+ others)
 - ✅ Auto-detects horizontal / vertical text layout per page
 - ✅ Clean PDF with correct CJK font/CMap per detected language
 - ✅ Re-embeds images, preserves hyperlinks, headings, TOC, footnotes, page numbers
 - ✅ Async job queue with Start / Pause / Stop / Delete / Retry controls
 - ✅ Google OAuth2 authentication (single-user, allowlist by email)
-- ✅ One Gemini API call per PDF page (efficient, low cost / quota)
+- ✅ One Gemini API call per page (efficient, low cost / quota)
 - ✅ Per-page OCR caching — pause/resume without spending extra quota
 
 ---
@@ -18,7 +19,7 @@ Self-hosted, single-user web app that converts **image-based PDF files** to clea
 
 The previous PaddleOCR / Surya implementations needed too much RAM for the Zeabur server. Gemini moves OCR off-server entirely — the worker just sends each page image to Google's API and receives structured JSON back. The Zeabur worker now uses **under 1 GB RAM** and needs no GPU or PyTorch.
 
-Trade-off: each PDF page = 1 Gemini API call, so **daily free-tier quota matters**. The default model `gemini-2.5-flash-lite` allows **1,000 requests per day for free**. If you pause or a job fails partway through, the OCR results for completed pages are cached — resuming costs zero extra quota for those pages.
+Trade-off: each page = 1 Gemini API call, so **daily free-tier quota matters**. If you pause or a job fails partway through, the OCR results for completed pages are cached — resuming costs zero extra quota for those pages.
 
 ---
 
@@ -55,11 +56,12 @@ The API and Worker run as a **single process** — the worker is a background da
 5. Copy the key — it looks like `AIzaSy...` (~39 characters)
 
 The `config.yaml` ships with **paid-plan** rate limits (`rpm_limit: 2000`, `rpd_limit: 10000`).
-If you are on the **free tier**, lower these values to stay within quota:
-- Free tier for `gemini-2.5-flash-lite`: **15 RPM**, **1,000 RPD**
-- Free tier for `gemini-2.5-flash`: **10 RPM**, **250 RPD**
+If you are on the **free tier**, lower these values to stay within quota. Free-tier RPM/RPD limits
+change over time and by account — check your current limits at
+[Google AI Studio → Rate limits](https://aistudio.google.com) before deploying, and set
+`rpm_limit` / `rpd_limit` in `config.yaml` accordingly.
 
-The quota resets at midnight Pacific Time. Each PDF page = 1 request.
+The quota resets at midnight Pacific Time. Each PDF page (or each uploaded JPG) = 1 request.
 
 ---
 
@@ -118,7 +120,7 @@ On Zeabur, push the repo to GitHub, create a new project, connect the repo, and 
 1. `https://YOUR-ZEABUR-DOMAIN/health` → `{"status":"ok","redis":true}`
 2. `https://YOUR-ZEABUR-DOMAIN` → login page
 3. Sign in with the allowlisted Gmail
-4. Upload a PDF, click **Start**, watch progress
+4. Upload a PDF or JPG, click **Start**, watch progress
 5. When done, click **↓ Clean PDF** to download
 
 ---
@@ -128,9 +130,9 @@ On Zeabur, push the repo to GitHub, create a new project, connect the repo, and 
 ```yaml
 ocr:
   engine: gemini
-  model_name: "gemini-2.5-flash-lite"   # default; change to gemini-2.5-flash for higher accuracy
-  rpm_limit: 2000                        # paid plan; use 15 for free tier
-  rpd_limit: 10000                       # paid plan; use 1000 for free tier
+  model_name: "gemini-3.5-flash-lite"   # default; change to gemini-3.5-flash for higher accuracy
+  rpm_limit: 2000                        # paid plan; lower to your free-tier RPM
+  rpd_limit: 10000                       # paid plan; lower to your free-tier RPD
   max_retries: 5
   request_timeout_s: 180
   confidence_threshold: 0.7
@@ -151,21 +153,23 @@ server:
 
 ### Free tier overrides
 
-If you are on the free Gemini tier, update `config.yaml`:
+If you are on the free Gemini tier, lower `rpm_limit` / `rpd_limit` in `config.yaml` to match the
+current free-tier limits shown for your account at
+[Google AI Studio → Rate limits](https://aistudio.google.com), e.g.:
 
 ```yaml
 ocr:
   rpm_limit: 15
-  rpd_limit: 1000
+  rpd_limit: 1500
 ```
 
-### Switching to `gemini-2.5-flash` (higher accuracy)
+### Switching to `gemini-3.5-flash` (higher accuracy)
 
 ```yaml
 ocr:
-  model_name: gemini-2.5-flash
-  rpm_limit: 2000    # paid plan; use 10 for free tier
-  rpd_limit: 10000   # paid plan; use 250 for free tier
+  model_name: gemini-3.5-flash
+  rpm_limit: 2000    # paid plan; lower to your free-tier RPM
+  rpd_limit: 10000   # paid plan; lower to your free-tier RPD
 ```
 
 Then `docker compose restart app` to apply.
@@ -208,7 +212,7 @@ ocr-pdf/
     ├── ocr_engine.py       # abstract OCREngine interface
     ├── engine_factory.py   # only "gemini" registered
     ├── gemini_engine.py    # ⭐ the Gemini API integration
-    ├── pdf_ingestion.py    # PyMuPDF
+    ├── pdf_ingestion.py    # PyMuPDF + JPG→1-page-PDF conversion
     ├── structure_analysis.py # text → headings / paragraphs / footnotes / …
     └── pdf_assembly.py     # ReportLab / PyMuPDF: clean PDF output
 ```
@@ -233,9 +237,9 @@ Verify `BASE_URL` matches your Zeabur domain exactly (no trailing slash) and the
 
 ## Cost Estimate
 
-`gemini-2.5-flash-lite` on the **free tier** is 0¢ as long as you stay under 1,000 requests/day.
+`gemini-3.5-flash-lite` on the **free tier** is 0¢ as long as you stay under your account's daily request quota. A JPG upload costs exactly 1 request (it is OCR'd as a single-page PDF).
 
-If you exceed the free tier and enable billing, paid pricing for `gemini-2.5-flash` is approximately **$0.30 per 1M input tokens** and **$2.50 per 1M output tokens**. A 100-page PDF at 400 DPI (downscaled to 2048px max side) uses roughly 200k input + 50k output tokens → about **$0.18 per 100 pages**.
+If you exceed the free tier and enable billing, check current per-token pricing for `gemini-3.5-flash-lite` / `gemini-3.5-flash` at [ai.google.dev/gemini-api/docs/pricing](https://ai.google.dev/gemini-api/docs/pricing) — pricing and quotas are updated by Google independently of this project.
 
 ---
 

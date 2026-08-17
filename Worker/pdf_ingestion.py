@@ -140,6 +140,22 @@ def ingest_pdf(pdf_path: Path, original_filename: str = "") -> IngestedPDF:
     return IngestedPDF(meta=meta, pages=pages, doc=doc)
 
 
+def convert_image_to_pdf(image_path: Path, pdf_path: Path, dpi: int = 300) -> None:
+    """
+    Wrap a single JPG/JPEG image in a one-page PDF so it can flow through the
+    same ingest → rasterize → OCR → assemble pipeline as a native PDF upload.
+
+    The PDF page size (in points) is derived from the image's pixel
+    dimensions at `dpi`, so rasterize_page(doc, 0, dpi=dpi) reconstructs the
+    image at its original pixel resolution with no resampling loss.
+    """
+    from PIL import Image
+
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        img.save(str(pdf_path), "PDF", resolution=float(dpi))
+
+
 def rasterize_page(doc: fitz.Document, page_num: int, dpi: int = 300):
     """
     Rasterize a single PDF page to a numpy ndarray (BGR, for OpenCV/PaddleOCR).

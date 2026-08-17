@@ -212,7 +212,7 @@
     <div class="page-header">
       <div>
         <h1>Convert</h1>
-        <div class="subtitle">Image PDF → clean or searchable PDF · CJK &amp; vertical text via Gemini</div>
+        <div class="subtitle">Image PDF or JPG → clean or searchable PDF · CJK &amp; vertical text via Gemini</div>
       </div>
       <a href="/library" class="btn btn-ghost">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
@@ -224,10 +224,10 @@
     <div class="upload-section">
       <div class="section-label">New Conversion</div>
       <div class="drop-zone" id="drop-zone">
-        <input type="file" id="file-input" accept=".pdf"/>
+        <input type="file" id="file-input" accept=".pdf,.jpg,.jpeg"/>
         <div class="drop-icon">⬆</div>
-        <div class="drop-text"><strong>Drop a PDF here</strong> or click to browse</div>
-        <div class="drop-meta">Max 100 MB · Image-based PDF · CJK + English</div>
+        <div class="drop-text"><strong>Drop a PDF or JPG here</strong> or click to browse</div>
+        <div class="drop-meta">Max 100 MB · Image-based PDF or JPG · CJK + English</div>
       </div>
     </div>
 
@@ -341,7 +341,8 @@ dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remov
 fileInput.addEventListener('change',()=>{if(fileInput.files[0])handleFile(fileInput.files[0])});
 
 async function handleFile(file){
-  if(!file.name.toLowerCase().endsWith('.pdf'))return showToast('Please select a PDF file.');
+  const fnLower=file.name.toLowerCase();
+  if(!(fnLower.endsWith('.pdf')||fnLower.endsWith('.jpg')||fnLower.endsWith('.jpeg')))return showToast('Please select a PDF or JPG file.');
   if(file.size>MAX_PDF_SIZE_MB*1024*1024)return showToast(`File exceeds ${MAX_PDF_SIZE_MB} MB limit.`);
   progressPanel.style.display='block';progressFn.textContent=file.name;
   progressMsg.textContent='Uploading…';progressPct.textContent='';progressActs.innerHTML='';
